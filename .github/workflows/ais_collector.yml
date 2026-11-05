@@ -2,10 +2,10 @@ name: Scheduled AIS Collection
 
 on:
   schedule:
-    # 15分ごとに実行（毎時 0分, 15分, 30分, 45分）
-    - cron: '*/15 * * * *'
+    # 毎時15分に自動実行（1日24回）
+    - cron: '15 * * * *'
   
-  # 手動実行ボタンも残す
+  # 手動実行ボタン
   workflow_dispatch:
 
 jobs:
