@@ -8,13 +8,13 @@ import searoute as sr
 
 try:
     import shapely
-    from shapely.geometry import Point, mapping
+    from shapely.geometry import Point, LineString, mapping
     from shapely.ops import unary_union
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely"])
     import shapely
-    from shapely.geometry import Point, mapping
+    from shapely.geometry import Point, LineString, mapping
     from shapely.ops import unary_union
 
 GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
@@ -113,67 +113,53 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
     return None
 
 # ==============================================================================
-# 2. 海洋航路計算・方位角計算
+# 2. 海洋航路計算・間引き・方位角計算
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
         return graph_route
-    
     try:
         route = sr.searoute([lon1, lat1], [lon2, lat2], units="km")
         if route and "geometry" in route and "coordinates" in route["geometry"]:
-            coords = [[round(pt[1], 5), round(pt[0], 5)] for pt in route["geometry"]["coordinates"]]
+            coords = [[round(pt[1], 4), round(pt[0], 4)] for pt in route["geometry"]["coordinates"]]
             if len(coords) >= 2:
                 return coords
     except Exception:
         pass
-
-    return [[round(lat1, 5), round(lon1, 5)], [round(lat2, 5), round(lon2, 5)]]
+    return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
 
 def unwrap_coordinates(coords):
-    if not coords or len(coords) < 2:
-        return coords
-    
+    if not coords or len(coords) < 2: return coords
     unwrapped = [coords[0]]
     prev_lon = coords[0][1]
     offset = 0.0
-
     for i in range(1, len(coords)):
         lat, lon = coords[i][0], coords[i][1]
         raw_lon = lon + offset
         diff = raw_lon - prev_lon
-        
         if diff > 180.0:
             offset -= 360.0
             raw_lon -= 360.0
         elif diff < -180.0:
             offset += 360.0
             raw_lon += 360.0
-            
-        unwrapped.append([lat, round(raw_lon, 5)])
+        unwrapped.append([lat, round(raw_lon, 4)])
         prev_lon = raw_lon
-
     return unwrapped
 
-def chaikin_smooth(points, iterations=3):
+def simplify_and_smooth(points):
+    """外洋直線区間を自動間引きし、頂点数を大幅削減（軽量化）"""
     if not points or len(points) < 3:
-        if len(points) == 2:
-            p0, p1 = points[0], points[1]
-            points = [p0, [round((p0[0]+p1[0])/2, 5), round((p0[1]+p1[1])/2, 5)], p1]
-        else: return points
-    current = points
-    for _ in range(iterations):
-        next_pts = [current[0]]
-        for i in range(len(current) - 1):
-            p0 = current[i]; p1 = current[i + 1]
-            next_pts.append([round(0.75*p0[0] + 0.25*p1[0], 5), round(0.75*p0[1] + 0.25*p1[1], 5)])
-            next_pts.append([round(0.25*p0[0] + 0.75*p1[0], 5), round(0.25*p0[1] + 0.75*p1[1], 5)])
-        next_pts.append(current[-1])
-        current = next_pts
-    return current
+        return points
+    try:
+        line = LineString([(p[1], p[0]) for p in points])
+        simplified = line.simplify(0.0008, preserve_topology=True)
+        coords = [[round(p[1], 4), round(p[0], 4)] for p in simplified.coords]
+        return coords if len(coords) >= 2 else points
+    except Exception:
+        return points
 
-# ★ 2点間の進行方位角（Bearing: 0〜360度）を計算
 def calculate_bearing(lat1, lon1, lat2, lon2):
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -186,10 +172,10 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 3. 動的カバレッジ生成
+# 3. 動的カバレッジ生成 ＆ 最新船舶データキャッシュ生成
 # ==============================================================================
 def generate_dynamic_coverage(session):
-    print("Generating dynamic AIS coverage from historical points...")
+    print("Generating dynamic AIS coverage...")
     url = f"{GAS_URL}?api=coverage_points"
     try:
         res = session.get(url, allow_redirects=True, timeout=60)
@@ -197,11 +183,7 @@ def generate_dynamic_coverage(session):
         points_data = res.json()
         if not points_data: return
 
-        buffers = []
-        for pt in points_data:
-            p = Point(pt[1], pt[0])
-            buffers.append(p.buffer(0.85, resolution=8))
-
+        buffers = [Point(pt[1], pt[0]).buffer(0.85, resolution=8) for pt in points_data]
         merged = unary_union(buffers)
         feature = {
             "type": "FeatureCollection",
@@ -213,9 +195,23 @@ def generate_dynamic_coverage(session):
         }
         with open("data/coverage_2026.json", "w", encoding="utf-8") as f:
             json.dump(feature, f, ensure_ascii=False, separators=(',', ':'))
-        print("Successfully generated data/coverage_2026.json")
+        print("data/coverage_2026.json generated.")
     except Exception as e:
         print("Error in dynamic coverage:", e)
+
+def cache_latest_summary(session):
+    """ブラウザ瞬時表示用の最新船舶・集計JSONを生成（コールドスタート回避）"""
+    print("Caching latest ships summary...")
+    url = f"{GAS_URL}?api=latest"
+    try:
+        res = session.get(url, allow_redirects=True, timeout=60)
+        if res.status_code == 200:
+            data = res.json()
+            with open("data/latest_2026.json", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+            print("data/latest_2026.json cached successfully.")
+    except Exception as e:
+        print("Note: latest cache skipped:", e)
 
 # ==============================================================================
 # 4. メイン処理
@@ -240,42 +236,29 @@ def main():
             cleaned_pts = []
             for p in raw_pts:
                 lat, lon = p[0], p[1]
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    continue
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180): continue
                 if not cleaned_pts:
                     cleaned_pts.append([lat, lon])
                 else:
-                    last = cleaned_pts[-1]
-                    dist = math.hypot(lat - last[0], lon - last[1])
-                    if dist > 0.001:
+                    if math.hypot(lat - cleaned_pts[-1][0], lon - cleaned_pts[-1][1]) > 0.001:
                         cleaned_pts.append([lat, lon])
 
-            if len(cleaned_pts) < 2:
-                continue
+            if len(cleaned_pts) < 2: continue
 
             full_track = []
             for i in range(len(cleaned_pts) - 1):
-                p1 = cleaned_pts[i]
-                p2 = cleaned_pts[i + 1]
-                seg = calculate_sea_route(p1[0], p1[1], p2[0], p2[1])
-                if not full_track:
-                    full_track.extend(seg)
-                else:
-                    full_track.extend(seg[1:])
+                seg = calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1])
+                full_track.extend(seg if not full_track else seg[1:])
 
             unwrapped_track = unwrap_coordinates(full_track)
-            smooth_track = chaikin_smooth(unwrapped_track, iterations=3)
+            simplified_track = simplify_and_smooth(unwrapped_track)
 
-            if unwrapped_track:
-                smooth_track[-1] = unwrapped_track[-1]
-
-            # ★ 最新の航行方位角（Heading）を算出
-            # 末尾（最新位置）と、それより一定距離離れた直前の点から進行方向を決定
-            heading = None
-            if len(smooth_track) >= 2:
-                last_p = smooth_track[-1]
-                for prev_p in reversed(smooth_track[:-1]):
-                    if math.hypot(last_p[0] - prev_p[0], last_p[1] - prev_p[1]) > 0.0003:
+            # 進行方位角（Heading）の事前計算
+            heading = 0.0
+            if len(simplified_track) >= 2:
+                last_p = simplified_track[-1]
+                for prev_p in reversed(simplified_track[:-1]):
+                    if math.hypot(last_p[0] - prev_p[0], last_p[1] - prev_p[1]) > 0.0005:
                         heading = calculate_bearing(prev_p[0], prev_p[1], last_p[0], last_p[1])
                         break
 
@@ -283,17 +266,16 @@ def main():
                 "mmsi": mmsi,
                 "name": name,
                 "cat": cat,
-                "coords": smooth_track,
-                "last_point": smooth_track[-1],
-                "heading": heading  # ★ 船の進行方位（0〜360度）を格納
+                "coords": simplified_track,
+                "heading": heading
             })
 
-    output_path = "data/routes_2026.json"
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open("data/routes_2026.json", "w", encoding="utf-8") as f:
         json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"前処理完了: {len(processed_tracks)} 隻の航跡と進行方位を出力しました。")
+    print(f"routes_2026.json: {len(processed_tracks)} 隻を出力しました。")
 
     generate_dynamic_coverage(session)
+    cache_latest_summary(session)
 
 if __name__ == "__main__":
     main()
