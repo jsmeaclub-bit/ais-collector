@@ -8,13 +8,13 @@ import searoute as sr
 
 try:
     import shapely
-    from shapely.geometry import Point, LineString, mapping
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely"])
     import shapely
-    from shapely.geometry import Point, LineString, mapping
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 
 GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
@@ -90,7 +90,7 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
             return route
     return None
 
-# 2. 海洋航路計算・間引き・方位角計算
+# 2. 海洋航路計算と高精度スムージング
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
@@ -124,17 +124,25 @@ def unwrap_coordinates(coords):
         prev_lon = raw_lon
     return unwrapped
 
-def simplify_and_smooth(points):
-    """外洋直線区間を自動間引きし、頂点数を大幅削減（軽量化）"""
+def chaikin_smooth(points, iterations=3):
+    """データ間引きを行わず、全ポイントを高品質な曲線へ変換"""
     if not points or len(points) < 3:
+        if len(points) == 2:
+            p0, p1 = points[0], points[1]
+            return [p0, [round((p0[0]+p1[0])/2, 4), round((p0[1]+p1[1])/2, 4)], p1]
         return points
-    try:
-        line = LineString([(p[1], p[0]) for p in points])
-        simplified = line.simplify(0.0008, preserve_topology=True)
-        coords = [[round(p[1], 4), round(p[0], 4)] for p in simplified.coords]
-        return coords if len(coords) >= 2 else points
-    except Exception:
-        return points
+    
+    current = points
+    for _ in range(iterations):
+        next_pts = [current[0]]
+        for i in range(len(current) - 1):
+            p0 = current[i]
+            p1 = current[i + 1]
+            next_pts.append([round(0.75*p0[0] + 0.25*p1[0], 4), round(0.75*p0[1] + 0.25*p1[1], 4)])
+            next_pts.append([round(0.25*p0[0] + 0.75*p1[0], 4), round(0.25*p0[1] + 0.75*p1[1], 4)])
+        next_pts.append(current[-1])
+        current = next_pts
+    return current
 
 def calculate_bearing(lat1, lon1, lat2, lon2):
     phi1 = math.radians(lat1)
@@ -174,7 +182,6 @@ def generate_dynamic_coverage(session):
         print("Error in dynamic coverage:", e)
 
 def cache_latest_summary(session):
-    """ブラウザ瞬時表示用の最新船舶・集計JSONを生成（コールドスタート回避）"""
     print("Caching latest ships summary...")
     url = f"{GAS_URL}?api=latest"
     try:
@@ -187,7 +194,7 @@ def cache_latest_summary(session):
     except Exception as e:
         print("Note: latest cache skipped:", e)
 
-# 4. メイン処理
+# 4. メイン処理（バックエンド側での高負荷タスク集中）
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
@@ -223,13 +230,37 @@ def main():
                 full_track.extend(seg if not full_track else seg[1:])
 
             unwrapped_track = unwrap_coordinates(full_track)
-            simplified_track = simplify_and_smooth(unwrapped_track)
+            
+            # ★ 1. データの省力化（間引き）を撤廃し、高品質な曲線を生成
+            curved_track = chaikin_smooth(unwrapped_track, iterations=3)
+
+            # ★ 2. ブラウザの負担を消すため、透過度・線幅・セグメント分割をPythonで事前計算
+            total_pts = len(curved_track)
+            num_segments = 14
+            step = max(1, (total_pts - 1) // num_segments)
+            fade_segments = []
+
+            for i in range(0, total_pts - 1, step):
+                end_index = min(i + step + 1, total_pts)
+                sub_coords = curved_track[i:end_index]
+                if len(sub_coords) < 2:
+                    continue
+                
+                t_val = end_index / total_pts
+                weight = round(1.0 + (2.8 * (t_val ** 1.2)), 2)
+                opacity = round(0.06 + (0.89 * (t_val ** 1.5)), 3)
+                
+                fade_segments.append({
+                    "coords": sub_coords,
+                    "weight": weight,
+                    "opacity": opacity
+                })
 
             # 進行方位角（Heading）の事前計算
             heading = 0.0
-            if len(simplified_track) >= 2:
-                last_p = simplified_track[-1]
-                for prev_p in reversed(simplified_track[:-1]):
+            if len(curved_track) >= 2:
+                last_p = curved_track[-1]
+                for prev_p in reversed(curved_track[:-1]):
                     if math.hypot(last_p[0] - prev_p[0], last_p[1] - prev_p[1]) > 0.0005:
                         heading = calculate_bearing(prev_p[0], prev_p[1], last_p[0], last_p[1])
                         break
@@ -238,13 +269,15 @@ def main():
                 "mmsi": mmsi,
                 "name": name,
                 "cat": cat,
-                "coords": simplified_track,
-                "heading": heading
+                "coords": curved_track,        # 背景の薄い線用
+                "segments": fade_segments,     # 描画用（計算済グラデーション配列）
+                "heading": heading,
+                "last_point": curved_track[-1] if curved_track else None
             })
 
     with open("data/routes_2026.json", "w", encoding="utf-8") as f:
         json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"routes_2026.json: {len(processed_tracks)} 隻を出力しました。")
+    print(f"routes_2026.json: {len(processed_tracks)} 隻のフル計算済みデータを出力しました。")
 
     generate_dynamic_coverage(session)
     cache_latest_summary(session)
