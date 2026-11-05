@@ -21,51 +21,29 @@ GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 if not GAS_URL:
     raise ValueError("エラー: 環境変数 GAS_WEBHOOK_URL が設定されていません。")
 
-# ==============================================================================
 # 1. 沿岸狭水路ネットワーク
-# ==============================================================================
 MARITIME_NODES = {
-    "IYO_WEST":     (33.650, 132.200),
-    "IYO_MID":      (33.800, 132.500),
-    "AKI_NADA":     (34.120, 132.700),
-    "SAI_WEST":     (34.050, 132.800),
-    "SAI_MID":      (34.090, 132.880),
-    "NOMA_OFF":     (34.135, 132.930),
-    "OGE_SETO":     (34.168, 132.970),
-    "KURUSHIMA_W":  (34.138, 133.002),
-    "KURUSHIMA_BRG":(34.118, 133.015),
-    "KURUSHIMA_E":  (34.092, 133.045),
-    "HUCHI_W":      (34.110, 133.100),
-    "HUCHI_MID":    (34.200, 133.350),
-    "BISAN_W":      (34.330, 133.650),
-    "BISAN_MID":    (34.380, 133.850),
-    "BISAN_E":      (34.420, 134.150),
-    "HARIMA_MID":   (34.500, 134.600),
-    "AKASHI_STR":   (34.610, 135.010),
-    "OSAKA_BAY":    (34.550, 135.250),
-    "KII_STR":      (34.100, 134.900),
-    "TYO_ENT":      (34.950, 139.750),
-    "URAGA_CH":     (35.220, 139.730),
-    "TYO_MID":      (35.450, 139.850),
-    "TYO_INN_W":    (35.580, 139.800),
-    "TYO_INN_E":    (35.580, 139.980),
-    "VN_OFFSHORE":  (10.250, 107.030),
-    "VN_ENTRANCE":  (10.380, 107.030),
-    "VN_CMIT_S":    (10.490, 107.020),
-    "VN_CMIT_N":    (10.550, 107.015),
-    "VN_THIVAI_UP": (10.600, 107.005),
+    "IYO_WEST":     (33.650, 132.200), "IYO_MID":      (33.800, 132.500), "AKI_NADA":     (34.120, 132.700),
+    "SAI_WEST":     (34.050, 132.800), "SAI_MID":      (34.090, 132.880), "NOMA_OFF":     (34.135, 132.930),
+    "OGE_SETO":     (34.168, 132.970), "KURUSHIMA_W":  (34.138, 133.002), "KURUSHIMA_BRG":(34.118, 133.015),
+    "KURUSHIMA_E":  (34.092, 133.045), "HUCHI_W":      (34.110, 133.100), "HUCHI_MID":    (34.200, 133.350),
+    "BISAN_W":      (34.330, 133.650), "BISAN_MID":    (34.380, 133.850), "BISAN_E":      (34.420, 134.150),
+    "HARIMA_MID":   (34.500, 134.600), "AKASHI_STR":   (34.610, 135.010), "OSAKA_BAY":    (34.550, 135.250),
+    "KII_STR":      (34.100, 134.900), "TYO_ENT":      (34.950, 139.750), "URAGA_CH":     (35.220, 139.730),
+    "TYO_MID":      (35.450, 139.850), "TYO_INN_W":    (35.580, 139.800), "TYO_INN_E":    (35.580, 139.980),
+    "VN_OFFSHORE":  (10.250, 107.030), "VN_ENTRANCE":  (10.380, 107.030), "VN_CMIT_S":    (10.490, 107.020),
+    "VN_CMIT_N":    (10.550, 107.015), "VN_THIVAI_UP": (10.600, 107.005),
 }
 
 MARITIME_EDGES = [
-    ("IYO_WEST", "IYO_MID"), ("IYO_MID", "SAI_WEST"), ("IYO_MID", "AKI_NADA"),
-    ("AKI_NADA", "SAI_MID"), ("SAI_WEST", "SAI_MID"), ("SAI_MID", "NOMA_OFF"),
-    ("NOMA_OFF", "OGE_SETO"), ("OGE_SETO", "KURUSHIMA_W"), ("KURUSHIMA_W", "KURUSHIMA_BRG"),
-    ("KURUSHIMA_BRG", "KURUSHIMA_E"), ("KURUSHIMA_E", "HUCHI_W"), ("HUCHI_W", "HUCHI_MID"),
-    ("HUCHI_MID", "BISAN_W"), ("BISAN_W", "BISAN_MID"), ("BISAN_MID", "BISAN_E"),
+    ("IYO_WEST", "IYO_MID"), ("IYO_MID", "SAI_WEST"), ("IYO_MID", "AKI_NADA"), ("AKI_NADA", "SAI_MID"), 
+    ("SAI_WEST", "SAI_MID"), ("SAI_MID", "NOMA_OFF"), ("NOMA_OFF", "OGE_SETO"), ("OGE_SETO", "KURUSHIMA_W"), 
+    ("KURUSHIMA_W", "KURUSHIMA_BRG"), ("KURUSHIMA_BRG", "KURUSHIMA_E"), ("KURUSHIMA_E", "HUCHI_W"), 
+    ("HUCHI_W", "HUCHI_MID"), ("HUCHI_MID", "BISAN_W"), ("BISAN_W", "BISAN_MID"), ("BISAN_MID", "BISAN_E"),
     ("BISAN_E", "HARIMA_MID"), ("HARIMA_MID", "AKASHI_STR"), ("AKASHI_STR", "OSAKA_BAY"),
-    ("HARIMA_MID", "KII_STR"), ("OSAKA_BAY", "KII_STR"),
-    ("TYO_ENT", "URAGA_CH"), ("URAGA_CH", "TYO_MID"), ("TYO_MID", "TYO_INN_W"), ("TYO_MID", "TYO_INN_E"),
-    ("VN_OFFSHORE", "VN_ENTRANCE"), ("VN_ENTRANCE", "VN_CMIT_S"), ("VN_CMIT_S", "VN_CMIT_N"), ("VN_CMIT_N", "VN_THIVAI_UP"),
+    ("HARIMA_MID", "KII_STR"), ("OSAKA_BAY", "KII_STR"), ("TYO_ENT", "URAGA_CH"), ("URAGA_CH", "TYO_MID"), 
+    ("TYO_MID", "TYO_INN_W"), ("TYO_MID", "TYO_INN_E"), ("VN_OFFSHORE", "VN_ENTRANCE"), 
+    ("VN_ENTRANCE", "VN_CMIT_S"), ("VN_CMIT_S", "VN_CMIT_N"), ("VN_CMIT_N", "VN_THIVAI_UP"),
 ]
 
 GRAPH = {node: [] for node in MARITIME_NODES}
@@ -112,9 +90,7 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
             return route
     return None
 
-# ==============================================================================
 # 2. 海洋航路計算・間引き・方位角計算
-# ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
@@ -171,9 +147,7 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     theta = math.atan2(y, x)
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
-# ==============================================================================
 # 3. 動的カバレッジ生成 ＆ 最新船舶データキャッシュ生成
-# ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage...")
     url = f"{GAS_URL}?api=coverage_points"
@@ -213,9 +187,7 @@ def cache_latest_summary(session):
     except Exception as e:
         print("Note: latest cache skipped:", e)
 
-# ==============================================================================
 # 4. メイン処理
-# ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
