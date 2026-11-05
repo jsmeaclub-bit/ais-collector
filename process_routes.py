@@ -129,7 +129,6 @@ def unwrap_coordinates(coords):
     return unwrapped
 
 def chaikin_smooth(points, iterations=3):
-    """データ間引きを行わず、全ポイントを高品質な曲線へ変換"""
     if not points or len(points) < 3:
         if len(points) == 2:
             p0, p1 = points[0], points[1]
@@ -187,7 +186,7 @@ def generate_dynamic_coverage(session):
     except Exception as e:
         print("Error in dynamic coverage:", e)
 
-def cache_latest_summary(session):
+def fetch_and_cache_latest_summary(session):
     print("Caching latest ships summary...")
     url = f"{GAS_URL}?api=latest"
     try:
@@ -197,15 +196,25 @@ def cache_latest_summary(session):
             with open("data/latest_2026.json", "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
             print("data/latest_2026.json cached successfully.")
+            return data
     except Exception as e:
         print("Note: latest cache skipped:", e)
+    return None
 
 # ==============================================================================
-# 4. メイン処理（バックエンド側での高負荷タスク集中）
+# 4. メイン処理（現在地との確実な結合）
 # ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
+
+    # ★ 最初に最新の現在地データを取得し、軌跡の終点として活用する
+    latest_data = fetch_and_cache_latest_summary(session)
+    latest_pos_map = {}
+    if latest_data and "latest" in latest_data:
+        for s in latest_data["latest"]:
+            if "mmsi" in s and "lat" in s and "lng" in s:
+                latest_pos_map[str(s["mmsi"])] = (s["lat"], s["lng"])
 
     tracks_url = f"{GAS_URL}?api=ship_tracks"
     print(f"Fetching ship tracks from: {tracks_url}")
@@ -215,19 +224,27 @@ def main():
     if res.status_code == 200:
         ships_tracks = res.json()
         for ship in ships_tracks:
-            mmsi = ship.get("mmsi")
+            mmsi = str(ship.get("mmsi"))
             name = ship.get("name", "Unknown")
             cat = ship.get("cat", "日本支配船")
             raw_pts = ship.get("points", [])
 
+            # ★ 最新の現在地座標を軌跡の最後尾に強制追加する（隙間防止）
+            if mmsi in latest_pos_map:
+                l_lat, l_lng = latest_pos_map[mmsi]
+                if not raw_pts or (raw_pts[-1][0] != l_lat or raw_pts[-1][1] != l_lng):
+                    raw_pts.append([l_lat, l_lng])
+
             cleaned_pts = []
-            for p in raw_pts:
+            for i, p in enumerate(raw_pts):
                 lat, lon = p[0], p[1]
                 if not (-90 <= lat <= 90 and -180 <= lon <= 180): continue
                 if not cleaned_pts:
                     cleaned_pts.append([lat, lon])
                 else:
-                    if math.hypot(lat - cleaned_pts[-1][0], lon - cleaned_pts[-1][1]) > 0.001:
+                    # ★ 最後の点（現在地）は距離フィルタを無視して絶対に間引かずに追加する
+                    is_last_point = (i == len(raw_pts) - 1)
+                    if is_last_point or math.hypot(lat - cleaned_pts[-1][0], lon - cleaned_pts[-1][1]) > 0.001:
                         cleaned_pts.append([lat, lon])
 
             if len(cleaned_pts) < 2: continue
@@ -238,14 +255,11 @@ def main():
                 full_track.extend(seg if not full_track else seg[1:])
 
             unwrapped_track = unwrap_coordinates(full_track)
-            
-            # ★ 1. 直線間引きを撤廃し、高品質な曲線を生成
             curved_track = chaikin_smooth(unwrapped_track, iterations=3)
 
             if len(curved_track) < 2:
                 continue
 
-            # ★ 2. ブラウザの負担を消すため、透過度・線幅・セグメント分割をPythonで事前計算
             total_pts = len(curved_track)
             num_segments = 14
             step = max(1, (total_pts - 1) // num_segments)
@@ -267,7 +281,6 @@ def main():
                     "opacity": opacity
                 })
 
-            # 進行方位角（Heading）の事前計算
             heading = 0.0
             if len(curved_track) >= 2:
                 last_p = curved_track[-1]
@@ -280,10 +293,9 @@ def main():
                 "mmsi": mmsi,
                 "name": name,
                 "cat": cat,
-                "coords": curved_track,        # 背景の薄い線用
-                "segments": fade_segments,     # 描画用（計算済グラデーション配列）
-                "heading": heading,
-                "last_point": curved_track[-1]
+                "coords": curved_track,        
+                "segments": fade_segments,     # ★船までピッタリ届く計算済みグラデーション
+                "heading": heading
             })
 
     with open("data/routes_2026.json", "w", encoding="utf-8") as f:
@@ -291,7 +303,6 @@ def main():
     print(f"routes_2026.json: {len(processed_tracks)} 隻のフル計算済みデータを出力しました。")
 
     generate_dynamic_coverage(session)
-    cache_latest_summary(session)
 
 if __name__ == "__main__":
     main()
