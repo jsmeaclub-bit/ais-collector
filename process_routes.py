@@ -22,7 +22,7 @@ if not GAS_URL:
     raise ValueError("エラー: 環境変数 GAS_WEBHOOK_URL が設定されていません。")
 
 # ==============================================================================
-# 1. 沿岸狭水路ネットワーク（国内・特定海峡）
+# 1. 沿岸狭水路ネットワーク
 # ==============================================================================
 MARITIME_NODES = {
     "IYO_WEST":     (33.650, 132.200),
@@ -113,7 +113,7 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
     return None
 
 # ==============================================================================
-# 2. 一般海上航路補間（外洋・大洋横断・国際航路）
+# 2. 海洋航路計算・方位角計算
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
@@ -172,6 +172,18 @@ def chaikin_smooth(points, iterations=3):
         next_pts.append(current[-1])
         current = next_pts
     return current
+
+# ★ 2点間の進行方位角（Bearing: 0〜360度）を計算
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_lambda = math.radians(lon2 - lon1)
+    while delta_lambda > math.pi: delta_lambda -= 2 * math.pi
+    while delta_lambda < -math.pi: delta_lambda += 2 * math.pi
+    y = math.sin(delta_lambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(delta_lambda)
+    theta = math.atan2(y, x)
+    return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
 # ==============================================================================
 # 3. 動的カバレッジ生成
@@ -257,18 +269,29 @@ def main():
             if unwrapped_track:
                 smooth_track[-1] = unwrapped_track[-1]
 
+            # ★ 最新の航行方位角（Heading）を算出
+            # 末尾（最新位置）と、それより一定距離離れた直前の点から進行方向を決定
+            heading = None
+            if len(smooth_track) >= 2:
+                last_p = smooth_track[-1]
+                for prev_p in reversed(smooth_track[:-1]):
+                    if math.hypot(last_p[0] - prev_p[0], last_p[1] - prev_p[1]) > 0.0003:
+                        heading = calculate_bearing(prev_p[0], prev_p[1], last_p[0], last_p[1])
+                        break
+
             processed_tracks.append({
                 "mmsi": mmsi,
                 "name": name,
                 "cat": cat,
                 "coords": smooth_track,
-                "last_point": smooth_track[-1]
+                "last_point": smooth_track[-1],
+                "heading": heading  # ★ 船の進行方位（0〜360度）を格納
             })
 
     output_path = "data/routes_2026.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"前処理完了: {len(processed_tracks)} 隻の航跡を出力しました（外洋航路補間適用済）。")
+    print(f"前処理完了: {len(processed_tracks)} 隻の航跡と進行方位を出力しました。")
 
     generate_dynamic_coverage(session)
 
