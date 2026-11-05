@@ -4,7 +4,7 @@ on:
   schedule:
     # 毎日 朝6時、12時、18時（UTC時間）に自動実行
     - cron: '0 6,12,18 * * *'
-  # 画面から手動でテスト実行できるようにする設定
+  # 手動実行ボタン
   workflow_dispatch:
 
 jobs:
@@ -23,11 +23,11 @@ jobs:
       - name: 必要なライブラリのインストール
         run: |
           python -m pip install --upgrade pip
-          pip install websockets gspread google-auth
+          pip install websockets requests
 
       - name: AISスクリプトを実行
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GAS_WEBAPP_URL: ${{ secrets.GAS_WEBAPP_URL }}
         run: |
           python main.py
