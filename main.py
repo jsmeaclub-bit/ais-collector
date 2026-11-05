@@ -30,7 +30,7 @@ def fetch_target_mmsis():
         print(f"Error fetching MMSI: {e}")
         return set()
 
-# 2. AISStream から位置(Msg 1,2,3)と静態(Msg 5: Destination/ETA)を受信
+# 2. AISStream から位置と静態情報を受信 (★ 180秒間実行)
 async def collect_ais_data(target_mmsis, duration_sec=180):
     uri = "wss://stream.aisstream.io/v0/stream"
     subscribe_message = {
@@ -75,7 +75,7 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
                             "eta": "-"
                         }
 
-                    # 位置メッセージ (Message 1, 2, 3)
+                    # 位置メッセージ
                     if msg_type == "PositionReport":
                         pos = msg.get("Message", {}).get("PositionReport", {})
                         ships_data[mmsi]["lat"] = pos.get("Latitude")
@@ -84,7 +84,7 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
                         if metadata.get("time_utc"):
                             ships_data[mmsi]["timestamp"] = metadata.get("time_utc")
 
-                    # 静態メッセージ (Message 5: 仕向港・ETA)
+                    # 静態メッセージ (仕向港・ETA)
                     elif msg_type == "ShipStaticData":
                         static = msg.get("Message", {}).get("ShipStaticData", {})
                         dest = static.get("Destination", "").strip()
