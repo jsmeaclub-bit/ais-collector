@@ -7,7 +7,6 @@ import requests
 import time
 from datetime import datetime, timezone, timedelta
 
-# 環境変数の取得
 GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 AISSTREAM_KEY = os.environ.get("AISSTREAM_API_KEY")
 
@@ -19,7 +18,7 @@ if not AISSTREAM_KEY:
     print("エラー: 環境変数 AISSTREAM_API_KEY が設定されていません。")
     sys.exit(1)
 
-# 受信待機時間（秒）：3分間（180秒）
+# 受信待機時間：3分間（180秒）
 COLLECTION_DURATION_SEC = 180
 
 def fetch_target_mmsi():
@@ -32,18 +31,14 @@ def fetch_target_mmsi():
         res = session.get(target_url, allow_redirects=True, timeout=60)
         res.raise_for_status()
 
-        # レスポンスがHTML（エラー画面等）になっていないか検証
         text = res.text.strip()
         if text.startswith("<"):
-            print("Failed to load MMSI list: GAS returned HTML instead of JSON.")
-            print(f"Response preview: {text[:200]}")
+            print("Failed to load MMSI list: GAS returned HTML.")
             return set()
 
         data = res.json()
         if isinstance(data, list):
             mmsi_set = set(str(m).strip() for m in data if str(m).strip())
-        elif isinstance(data, dict) and "mmsi" in data:
-            mmsi_set = set(str(m).strip() for m in data["mmsi"] if str(m).strip())
         else:
             mmsi_set = set()
 
@@ -55,96 +50,103 @@ def fetch_target_mmsi():
         return set()
 
 async def collect_ais_stream(target_mmsi):
-    """AISStream.io の WebSocket に接続し、対象船の電波を受信"""
+    """AISStream.io から電波を受信し、5,347隻の対象船のみを抽出"""
     detected_ships = {}
     ws_url = "wss://stream.aisstream.io/v0/stream"
 
-    # サブスクリプションメッセージの組み立て
+    # ★ サーバー切断を防ぐため、FiltersShipMMSI は送らず全世界指定（軽量）にする
     sub_message = {
         "APIKey": AISSTREAM_KEY,
         "BoundingBoxes": [[[-90, -180], [90, 180]]]
     }
-    # フィルタ条件に対象MMSIを指定
-    if target_mmsi:
-        sub_message["FiltersShipMMSI"] = list(target_mmsi)
 
-    print("Connecting to AISStream.io WebSocket...")
     start_time = time.time()
+    print(f"Connecting to AISStream.io. Collecting for {COLLECTION_DURATION_SEC} seconds...")
 
-    try:
-        async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
-            await ws.send(json.dumps(sub_message))
-            print(f"Connected. Collecting AIS signals for {COLLECTION_DURATION_SEC} seconds...")
+    while True:
+        elapsed = time.time() - start_time
+        remaining = COLLECTION_DURATION_SEC - elapsed
+        if remaining <= 0:
+            break
 
-            while True:
-                elapsed = time.time() - start_time
-                if elapsed >= COLLECTION_DURATION_SEC:
-                    print(f"Time limit reached ({COLLECTION_DURATION_SEC}s). Stopping collection.")
-                    break
+        try:
+            async with websockets.connect(
+                ws_url,
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=10 * 1024 * 1024 # 受信バッファ拡張
+            ) as ws:
+                await ws.send(json.dumps(sub_message))
+                print(f"WebSocket connected. Stream active (Remaining: {int(remaining)}s)...")
 
-                try:
-                    # タイムアウト付きでメッセージ受信
-                    msg_text = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                    msg = json.loads(msg_text)
+                while True:
+                    if time.time() - start_time >= COLLECTION_DURATION_SEC:
+                        break
 
-                    meta = msg.get("MetaData", {})
-                    mmsi = str(meta.get("MMSI", "")).strip()
+                    try:
+                        msg_text = await asyncio.wait_for(ws.recv(), timeout=8.0)
+                        msg = json.loads(msg_text)
 
-                    if not mmsi or mmsi not in target_mmsi:
+                        meta = msg.get("MetaData", {})
+                        mmsi = str(meta.get("MMSI", "")).strip()
+
+                        # ★ 5,347隻の対象船に該当するかメモリ上で判定
+                        if not mmsi or mmsi not in target_mmsi:
+                            continue
+
+                        lat = meta.get("latitude")
+                        lng = meta.get("longitude")
+                        if lat is None or lng is None or (lat == 0 and lng == 0):
+                            continue
+
+                        # 速力・船名の抽出
+                        msg_type = msg.get("MessageType")
+                        msg_body = msg.get("Message", {})
+                        speed = 0.0
+
+                        if msg_type == "PositionReport" and "PositionReport" in msg_body:
+                            pos = msg_body["PositionReport"]
+                            lat = pos.get("Latitude", lat)
+                            lng = pos.get("Longitude", lng)
+                            speed = pos.get("Sog", 0.0)
+                        elif msg_type == "StandardClassBPositionReport" and "StandardClassBPositionReport" in msg_body:
+                            pos = msg_body["StandardClassBPositionReport"]
+                            lat = pos.get("Latitude", lat)
+                            lng = pos.get("Longitude", lng)
+                            speed = pos.get("Sog", 0.0)
+
+                        ship_name = str(meta.get("ShipName", "Unknown")).strip()
+
+                        # 最新位置の更新
+                        detected_ships[mmsi] = {
+                            "mmsi": mmsi,
+                            "name": ship_name,
+                            "lat": round(float(lat), 5),
+                            "lng": round(float(lng), 5),
+                            "speed": round(float(speed), 1),
+                            "timestamp": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
+                        }
+
+                    except asyncio.TimeoutError:
                         continue
+                    except websockets.exceptions.ConnectionClosed:
+                        print("WebSocket temporarily closed. Reconnecting...")
+                        break
 
-                    # 位置情報メッセージの抽出
-                    msg_type = msg.get("MessageType")
-                    msg_body = msg.get("Message", {})
-                    lat = meta.get("latitude")
-                    lng = meta.get("longitude")
-                    speed = 0.0
-
-                    if msg_type == "PositionReport" and "PositionReport" in msg_body:
-                        pos = msg_body["PositionReport"]
-                        lat = pos.get("Latitude", lat)
-                        lng = pos.get("Longitude", lng)
-                        speed = pos.get("Sog", 0.0)
-                    elif msg_type == "StandardClassBPositionReport" and "StandardClassBPositionReport" in msg_body:
-                        pos = msg_body["StandardClassBPositionReport"]
-                        lat = pos.get("Latitude", lat)
-                        lng = pos.get("Longitude", lng)
-                        speed = pos.get("Sog", 0.0)
-
-                    if lat is None or lng is None or (lat == 0 and lng == 0):
-                        continue
-
-                    ship_name = str(meta.get("ShipName", "Unknown")).strip()
-
-                    # 船舶ごとの最新位置を記録
-                    detected_ships[mmsi] = {
-                        "mmsi": mmsi,
-                        "name": ship_name,
-                        "lat": round(float(lat), 5),
-                        "lng": round(float(lng), 5),
-                        "speed": round(float(speed), 1),
-                        "timestamp": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
-                    }
-
-                except asyncio.TimeoutError:
-                    continue
-                except websockets.exceptions.ConnectionClosed:
-                    print("WebSocket connection closed by server.")
-                    break
-
-    except Exception as e:
-        print(f"WebSocket error: {e}")
+        except Exception as e:
+            print(f"Connection error: {e}. Retrying in 3 seconds...")
+            await asyncio.sleep(3)
 
     return detected_ships
 
 def post_traffic_to_gas(ships_dict):
-    """検知した最新船舶データをGASへ送信（スプレッドシート更新）"""
+    """検知した船舶データをGASへ送信（スプレッドシート更新）"""
     if not ships_dict:
-        print("No ships detected in this run. Skipping GAS update.")
+        print("No target ships detected in this run. Skipping GAS update.")
         return
 
     ships_list = list(ships_dict.values())
-    print(f"Total unique target ships detected: {len(ships_list)}")
+    print(f"Total target ships detected: {len(ships_list)}")
     print("Posting detected ships to GAS...")
 
     payload = {
@@ -155,15 +157,15 @@ def post_traffic_to_gas(ships_dict):
     try:
         session = requests.Session()
         res = session.post(GAS_URL, json=payload, allow_redirects=True, timeout=60)
-        print(f"GAS update response status: {res.status_code}")
-        print(f"Response: {res.text[:150]}")
+        print(f"GAS response status: {res.status_code}")
+        print(f"GAS response: {res.text[:150]}")
     except Exception as e:
-        print(f"Failed to post data to GAS: {e}")
+        print(f"Failed to post to GAS: {e}")
 
 def main():
     target_mmsi = fetch_target_mmsi()
     if not target_mmsi:
-        print("No target MMSI found. Exiting to prevent full processing.")
+        print("No target MMSI found. Exiting.")
         sys.exit(0)
 
     detected = asyncio.run(collect_ais_stream(target_mmsi))
