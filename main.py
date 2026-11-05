@@ -28,7 +28,7 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 沿岸狭水路ネットワーク定義
+# 1. 沿岸狭水路ネットワーク
 # ==============================================================================
 MARITIME_NODES = {
     "IYO_WEST":     (33.650, 132.200), "IYO_MID":      (33.800, 132.500), "AKI_NADA":     (34.120, 132.700),
@@ -98,6 +98,9 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
             return route
     return None
 
+# ==============================================================================
+# 2. 航路計算・平滑化・方位角計算
+# ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
@@ -132,7 +135,6 @@ def unwrap_coordinates(coords):
     return unwrapped
 
 def chaikin_smooth(points, iterations=3):
-    """角を丸めて滑らかな曲線にする"""
     if not points or len(points) < 3:
         if len(points) == 2:
             p0, p1 = points[0], points[1]
@@ -163,10 +165,10 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# ステップ 1: GASからマスタ情報・過去履歴を取得
+# 3. GASからの基礎データ取得
 # ==============================================================================
 def fetch_base_data_from_gas(session):
-    print("Fetching target MMSIs and historical tracks from GAS...")
+    print("Fetching target MMSIs, base latest data, and history tracks from GAS...")
     mmsi_url = f"{GAS_URL}?api=mmsi"
     tracks_url = f"{GAS_URL}?api=ship_tracks"
     latest_url = f"{GAS_URL}?api=latest"
@@ -196,7 +198,7 @@ def fetch_base_data_from_gas(session):
     return target_mmsis, existing_tracks, base_latest
 
 # ==============================================================================
-# ステップ 2: AISStream.io からリアルタイム受信 (180秒)
+# 4. AISStream.io からのリアルタイム受信 (180秒)
 # ==============================================================================
 async def collect_ais_data(target_mmsis, duration_sec=180):
     uri = "wss://stream.aisstream.io/v0/stream"
@@ -277,12 +279,11 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
     return valid_ships
 
 # ==============================================================================
-# ステップ 3: 受信データを最先端として結合し、軌跡・セグメントを完全事前計算
+# 5. 受信データを最先端として直結・完全同期計算
 # ==============================================================================
 def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
-    print("Synchronizing latest AIS hits directly into track endpoints...")
+    print("Synchronizing received AIS points directly to track endpoints...")
     
-    # 1. 最新位置マップを更新（今回受信した船を最優先で反映）
     latest_list = base_latest.get("latest", [])
     latest_map = {str(s["mmsi"]): s for s in latest_list}
 
@@ -315,9 +316,7 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         "latest": list(latest_map.values())
     }
 
-    # 2. 過去航跡の末尾に、今回の最新座標を直接アペンド
     processed_tracks = []
-    
     for mmsi, l_ship in latest_map.items():
         lat = l_ship.get("lat")
         lng = l_ship.get("lng")
@@ -327,11 +326,10 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         if mmsi in existing_tracks:
             pts = existing_tracks[mmsi]["points"][:]
         
-        # 今回の最新位置を航跡の末尾として追加
+        # 今回の最新位置を必ず末尾へ接合
         if not pts or (pts[-1][0] != lat or pts[-1][1] != lng):
             pts.append([lat, lng])
 
-        # 頂点の整理
         cleaned_pts = []
         for i, p in enumerate(pts):
             p_lat, p_lon = p[0], p[1]
@@ -340,13 +338,11 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
                 cleaned_pts.append([p_lat, p_lon])
             else:
                 is_last_point = (i == len(pts) - 1)
-                # 最後の点（現在地）は絶対に間引かず採用
                 if is_last_point or math.hypot(p_lat - cleaned_pts[-1][0], p_lon - cleaned_pts[-1][1]) > 0.001:
                     cleaned_pts.append([p_lat, p_lon])
 
         if len(cleaned_pts) < 2: continue
 
-        # 海洋航路計算
         full_track = []
         for i in range(len(cleaned_pts) - 1):
             seg = calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1])
@@ -355,10 +351,9 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         unwrapped_track = unwrap_coordinates(full_track)
         curved_track = chaikin_smooth(unwrapped_track, iterations=3)
 
-        # ★最重要アンカー固定: Chaikin平滑化によって先端がズレないよう、最後の座標を最新位置に強制一致
+        # ★先端アンカー固定：平滑化による丸まりを防ぎ、確実に最新位置と一致させる
         curved_track[-1] = [lat, lng]
 
-        # 14段階フェードセグメントの事前計算（先端へ向かって太く・濃く）
         total_pts = len(curved_track)
         num_segments = 14
         step = max(1, (total_pts - 1) // num_segments)
@@ -379,7 +374,6 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
                 "opacity": opacity
             })
 
-        # 船首方位角（Heading）の事前計算
         heading = 0.0
         if len(curved_track) >= 2:
             last_p = curved_track[-1]
@@ -400,56 +394,74 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     return synchronized_latest_data, processed_tracks
 
 # ==============================================================================
-# ステップ 4: JSON出力 & GASへの保存
+# 6. 動的カバレッジ生成
 # ==============================================================================
-def save_outputs(synchronized_latest, processed_tracks):
-    os.makedirs("data", exist_ok=True)
-
-    with open("data/latest_2026.json", "w", encoding="utf-8") as f:
-        json.dump(synchronized_latest, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"data/latest_2026.json cached ({len(synchronized_latest['latest'])} ships).")
-
-    with open("data/routes_2026.json", "w", encoding="utf-8") as f:
-        json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"data/routes_2026.json cached ({len(processed_tracks)} tracks).")
-
-def post_to_gas(new_ships):
-    if not new_ships: return
-    print(f"Posting {len(new_ships)} freshly detected ships to GAS...")
+def generate_dynamic_coverage(session):
+    print("Generating dynamic AIS coverage...")
+    url = f"{GAS_URL}?api=coverage_points"
     try:
-        res = requests.post(GAS_URL, json={"ships": new_ships}, timeout=60)
-        print(f"GAS response status: {res.status_code}")
+        res = session.get(url, allow_redirects=True, timeout=60)
+        if res.status_code != 200: return
+        points_data = res.json()
+        if not points_data: return
+
+        buffers = [Point(pt[1], pt[0]).buffer(0.85, resolution=8) for pt in points_data]
+        merged = unary_union(buffers)
+        feature = {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {"description": "地上AIS受信実績圏"},
+                "geometry": mapping(merged)
+            }]
+        }
+        with open("data/coverage_2026.json", "w", encoding="utf-8") as f:
+            json.dump(feature, f, ensure_ascii=False, separators=(',', ':'))
+        print("data/coverage_2026.json generated.")
     except Exception as e:
-        print(f"Error posting to GAS: {e}")
+        print("Error in dynamic coverage:", e)
 
 # ==============================================================================
-# メインエントリポイント
+# 7. メイン実行フロー
 # ==============================================================================
 def main():
+    os.makedirs("data", exist_ok=True)
     session = requests.Session()
 
-    # 1. 基準データ取得
+    # 1. 基礎データ取得
     target_mmsis, existing_tracks, base_latest = fetch_base_data_from_gas(session)
     if not target_mmsis:
         print("No target MMSIs loaded. Exiting.")
         sys.exit(0)
 
-    # 2. 180秒間AISデータ収集
+    # 2. 180秒データ収集
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     new_ships = loop.run_until_complete(collect_ais_data(target_mmsis, duration_sec=180))
 
-    # 3. 取得データを直接先端として軌跡・セグメントを事前計算（完全同期）
+    # 3. 軌跡・最新位置を完全同期で一括事前計算
     synchronized_latest, processed_tracks = process_and_synchronize_tracks(
         new_ships, existing_tracks, base_latest
     )
 
-    # 4. 同期した静的JSONファイルを保存
-    save_outputs(synchronized_latest, processed_tracks)
+    # 4. JSONキャッシュを出力
+    with open("data/latest_2026.json", "w", encoding="utf-8") as f:
+        json.dump(synchronized_latest, f, ensure_ascii=False, separators=(',', ':'))
+    with open("data/routes_2026.json", "w", encoding="utf-8") as f:
+        json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
+    print(f"data/routes_2026.json cached ({len(processed_tracks)} tracks).")
 
-    # 5. GASのスプレッドシートへバックアップ保存
-    post_to_gas(new_ships)
-    print("All processes successfully completed!")
+    # 5. カバレッジ生成
+    generate_dynamic_coverage(session)
+
+    # 6. GASスプレッドシートへバックアップ更新
+    if new_ships:
+        print(f"Posting {len(new_ships)} ships to GAS...")
+        try:
+            res = requests.post(GAS_URL, json={"ships": new_ships}, timeout=60)
+            print(f"GAS response: {res.status_code}")
+        except Exception as e:
+            print(f"Error posting to GAS: {e}")
 
 if __name__ == "__main__":
     main()
