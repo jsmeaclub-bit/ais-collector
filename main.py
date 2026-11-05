@@ -36,7 +36,6 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
     subscribe_message = {
         "APIKey": API_KEY,
         "BoundingBoxes": [[[-90.0, -180.0], [90.0, 180.0]]],
-        # PositionReport と ShipStaticData の両方を購読
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
     }
 
@@ -98,20 +97,18 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
                             day = eta_dict.get("Day", 0)
                             hr = eta_dict.get("Hour", 0)
                             mn = eta_dict.get("Minute", 0)
-                            # 正常値のみフォーマット（AIS未設定値 0/24等は除外）
                             if 1 <= mo <= 12 and 1 <= day <= 31 and hr < 24 and mn < 60:
                                 current_year = datetime.datetime.utcnow().year
                                 ships_data[mmsi]["eta"] = f"{current_year}/{mo:02d}/{day:02d} {hr:02d}:{mn:02d} UTC"
 
                 except asyncio.TimeoutError:
                     continue
-                except Exception as ex:
+                except Exception:
                     continue
 
     except Exception as e:
         print(f"WebSocket connection error: {e}")
 
-    # 位置が取得できた船舶のみを送信対象とする
     valid_ships = [s for s in ships_data.values() if s["lat"] is not None and s["lng"] is not None]
     return valid_ships
 
