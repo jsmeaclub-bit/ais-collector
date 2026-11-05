@@ -26,25 +26,18 @@ jobs:
         run: |
           pip install websockets requests shapely searoute
 
-      # ステップ1: AIS電波の収集とGAS更新（約3分間）
-      - name: Run AIS Collector
+      # 収集・軌跡生成・完全同期キャッシュ生成を1本で実行（約3分20秒）
+      - name: Run AIS Collector and Route Builder
         env:
           GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
         run: |
           python main.py
 
-      # ステップ2: 航跡結合とダイナミックカバレッジ計算（約20秒）
-      - name: Process Routes and Coverage
-        env:
-          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
-        run: |
-          python process_routes.py
-
-      # ステップ3: 生成された最新JSONをGitHubリポジトリへ反映
+      # 生成された最新JSON（routes, coverage, latest）をGitHubへ反映
       - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/routes_2026.json data/coverage_2026.json
-          git diff --staged --quiet || (git commit -m "Auto-update: Ship tracks and dynamic coverage [skip ci]" && git push)
+          git add data/
+          git diff --staged --quiet || (git commit -m "Auto-update: Ship tracks, positions, and coverage [skip ci]" && git push)
