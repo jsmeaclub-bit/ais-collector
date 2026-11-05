@@ -6,7 +6,6 @@ import heapq
 import requests
 import searoute as sr
 
-# shapely の自動インポート（未インストールの場合は自動セットアップ）
 try:
     import shapely
     from shapely.geometry import Point, mapping
@@ -22,9 +21,7 @@ GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 if not GAS_URL:
     raise ValueError("エラー: 環境変数 GAS_WEBHOOK_URL が設定されていません。")
 
-# ==============================================================================
-# 1. 狭水路航路データベース（ダイクストラ法）
-# ==============================================================================
+# 狭水路ネットワーク
 MARITIME_NODES = {
     "IYO_WEST":     (33.650, 132.200),
     "IYO_MID":      (33.800, 132.500),
@@ -93,8 +90,7 @@ def dijkstra_shortest_path(start_node, end_node):
         if curr in visited and visited[curr] <= cost: continue
         visited[curr] = cost
         new_path = path + [curr]
-        if curr == end_node:
-            return [MARITIME_NODES[n] for n in new_path]
+        if curr == end_node: return [MARITIME_NODES[n] for n in new_path]
         for neighbor, edge_cost in GRAPH.get(curr, []):
             if neighbor not in visited:
                 heapq.heappush(queue, (cost + edge_cost, neighbor, new_path))
@@ -125,7 +121,7 @@ def calculate_sea_route(lat1, lon1, lat2, lon2):
     except Exception: pass
     return [[round(lat1, 5), round(lon1, 5)], [round(lat2, 5), round(lon2, 5)]]
 
-def chaikin_smooth(points, iterations=4):
+def chaikin_smooth(points, iterations=3):
     if not points or len(points) < 3:
         if len(points) == 2:
             p0, p1 = points[0], points[1]
@@ -135,112 +131,104 @@ def chaikin_smooth(points, iterations=4):
     for _ in range(iterations):
         next_pts = [current[0]]
         for i in range(len(current) - 1):
-            p0, p1 = current[i], current[i + 1]
+            p0 = current[i]; p1 = current[i + 1]
             next_pts.append([round(0.75*p0[0] + 0.25*p1[0], 5), round(0.75*p0[1] + 0.25*p1[1], 5)])
             next_pts.append([round(0.25*p0[0] + 0.75*p1[0], 5), round(0.25*p0[1] + 0.75*p1[1], 5)])
         next_pts.append(current[-1])
         current = next_pts
     return current
 
-# ==============================================================================
-# 2. 実績座標からの動的地上AISカバレッジ（50海里バッファ結合）生成
-# ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage from historical points...")
     url = f"{GAS_URL}?api=coverage_points"
     try:
         res = session.get(url, allow_redirects=True, timeout=60)
-        if res.status_code != 200:
-            print("Failed to fetch coverage points:", res.status_code)
-            return
-
+        if res.status_code != 200: return
         points_data = res.json()
-        if not points_data or len(points_data) == 0:
-            print("No coverage points available.")
-            return
+        if not points_data: return
 
-        print(f"Loaded {len(points_data)} unique historical detection points.")
-
-        # 各検知点から半径約50海里（約0.83度）の円形バッファを作成
-        # 解像度8（32角形の円近似）で高速結合
         buffers = []
         for pt in points_data:
-            lat, lon = pt[0], pt[1]
-            p = Point(lon, lat)
+            p = Point(pt[1], pt[0])
             buffers.append(p.buffer(0.85, resolution=8))
 
-        # 全バッファをマージ結合して1つの外郭ポリゴン群に合成
         merged = unary_union(buffers)
-        geojson_geom = mapping(merged)
-
         feature = {
             "type": "FeatureCollection",
             "features": [{
                 "type": "Feature",
-                "properties": {
-                    "description": "地上AIS受信実績圏（検知実績から半径約50海里を自動展開）"
-                },
-                "geometry": geojson_geom
+                "properties": {"description": "地上AIS受信実績圏"},
+                "geometry": mapping(merged)
             }]
         }
-
         with open("data/coverage_2026.json", "w", encoding="utf-8") as f:
             json.dump(feature, f, ensure_ascii=False, separators=(',', ':'))
-
         print("Successfully generated data/coverage_2026.json")
-
     except Exception as e:
-        print("Error in dynamic coverage generation:", e)
+        print("Error in dynamic coverage:", e)
 
-# ==============================================================================
-# 3. メイン処理
-# ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
 
-    # A. 航路帯の計算と出力
-    target_url = f"{GAS_URL}?api=routes"
-    res = session.get(target_url, allow_redirects=True, timeout=60)
+    # 1. 各船ごとの時系列航跡を取得して処理
+    tracks_url = f"{GAS_URL}?api=ship_tracks"
+    print(f"Fetching ship tracks from: {tracks_url}")
+    res = session.get(tracks_url, allow_redirects=True, timeout=90)
+    
+    processed_tracks = []
     if res.status_code == 200:
-        raw_routes = res.json()
-        valid_routes = []
-        for row in raw_routes:
-            try:
-                s_lat, s_lng = row.get("Start_Lat"), row.get("Start_Lng")
-                e_lat, e_lng = row.get("End_Lat"), row.get("End_Lng")
-                if None in (s_lat, s_lng, e_lat, e_lng): continue
-                lat1, lon1, lat2, lon2 = float(s_lat), float(s_lng), float(e_lat), float(e_lng)
-                if not (-90 <= lat1 <= 90 and -180 <= lon1 <= 180 and -90 <= lat2 <= 90 and -180 <= lon2 <= 180): continue
-                valid_routes.append({
-                    "cat": str(row.get("Category") or "日本支配船"),
-                    "count": int(row.get("Count") or 1),
-                    "p1": [lat1, lon1], "p2": [lat2, lon2]
-                })
-            except: continue
+        ships_tracks = res.json()
+        for ship in ships_tracks:
+            mmsi = ship.get("mmsi")
+            name = ship.get("name", "Unknown")
+            cat = ship.get("cat", "日本支配船")
+            raw_pts = ship.get("points", [])
 
-        total_items = len(valid_routes)
-        processed_routes = []
-        for idx, item in enumerate(valid_routes):
-            raw_coords = calculate_sea_route(item["p1"][0], item["p1"][1], item["p2"][0], item["p2"][1])
-            smooth_coords = chaikin_smooth(raw_coords, iterations=4)
-            time_ratio = (idx + 1) / total_items if total_items > 1 else 1.0
-            glow_opacity = round(0.15 + 0.75 * math.pow(time_ratio, 1.3), 3)
-            core_opacity = round(0.25 + 0.75 * math.pow(time_ratio, 1.1), 3)
-            base_weight = min(16.0, max(3.2, 1.8 + math.log1p(item["count"]) * 2.3))
-            seg_weight = round(base_weight * (0.7 + 0.3 * time_ratio), 2)
+            # 重複点の除去と距離チェック
+            cleaned_pts = []
+            for p in raw_pts:
+                if not cleaned_pts:
+                    cleaned_pts.append(p)
+                else:
+                    last = cleaned_pts[-1]
+                    dist = math.hypot(p[0] - last[0], p[1] - last[1])
+                    if dist > 0.001 and dist < 15.0: # 微小ノイズと異常ワープを除去
+                        cleaned_pts.append(p)
 
-            processed_routes.append({
-                "cat": item["cat"], "count": item["count"], "coords": smooth_coords,
-                "glow_op": glow_opacity, "core_op": core_opacity, "weight": seg_weight,
-                "status": "直近の航行実績" if time_ratio > 0.8 else "過去の航行実績"
+            if len(cleaned_pts) < 2:
+                continue
+
+            # 各区間を海路補間して一本の連続航跡に結合
+            full_track = []
+            for i in range(len(cleaned_pts) - 1):
+                p1 = cleaned_pts[i]
+                p2 = cleaned_pts[i + 1]
+                seg = calculate_sea_route(p1[0], p1[1], p2[0], p2[1])
+                if not full_track:
+                    full_track.extend(seg)
+                else:
+                    full_track.extend(seg[1:])
+
+            # 滑らかに平滑化
+            smooth_track = chaikin_smooth(full_track, iterations=3)
+            # ★ 最終点は確実に最新の検知位置（〇）に強制一致させる
+            smooth_track[-1] = [cleaned_pts[-1][0], cleaned_pts[-1][1]]
+
+            processed_tracks.append({
+                "mmsi": mmsi,
+                "name": name,
+                "cat": cat,
+                "coords": smooth_track,
+                "last_point": smooth_track[-1]
             })
 
-        with open("data/routes_2026.json", "w", encoding="utf-8") as f:
-            json.dump(processed_routes, f, ensure_ascii=False, separators=(',', ':'))
-        print(f"Successfully generated data/routes_2026.json ({len(processed_routes)} routes)")
+    output_path = "data/routes_2026.json"
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
+    print(f"前処理完了: {len(processed_tracks)} 隻の連続航跡を出力しました。")
 
-    # B. 実績連動型動的カバレッジの生成
+    # 2. 動的カバレッジの生成
     generate_dynamic_coverage(session)
 
 if __name__ == "__main__":
