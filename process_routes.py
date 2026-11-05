@@ -21,7 +21,9 @@ GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 if not GAS_URL:
     raise ValueError("エラー: 環境変数 GAS_WEBHOOK_URL が設定されていません。")
 
-# 狭水路ネットワーク
+# ==============================================================================
+# 1. 沿岸狭水路ネットワーク（国内・特定海峡）
+# ==============================================================================
 MARITIME_NODES = {
     "IYO_WEST":     (33.650, 132.200),
     "IYO_MID":      (33.800, 132.500),
@@ -110,16 +112,49 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
             return route
     return None
 
+# ==============================================================================
+# 2. 一般海上航路補間（外洋・大洋横断・国際航路）
+# ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
-    if graph_route and len(graph_route) >= 2: return graph_route
+    if graph_route and len(graph_route) >= 2:
+        return graph_route
+    
     try:
         route = sr.searoute([lon1, lat1], [lon2, lat2], units="km")
         if route and "geometry" in route and "coordinates" in route["geometry"]:
             coords = [[round(pt[1], 5), round(pt[0], 5)] for pt in route["geometry"]["coordinates"]]
-            if len(coords) >= 2: return coords
-    except Exception: pass
+            if len(coords) >= 2:
+                return coords
+    except Exception:
+        pass
+
     return [[round(lat1, 5), round(lon1, 5)], [round(lat2, 5), round(lon2, 5)]]
+
+def unwrap_coordinates(coords):
+    if not coords or len(coords) < 2:
+        return coords
+    
+    unwrapped = [coords[0]]
+    prev_lon = coords[0][1]
+    offset = 0.0
+
+    for i in range(1, len(coords)):
+        lat, lon = coords[i][0], coords[i][1]
+        raw_lon = lon + offset
+        diff = raw_lon - prev_lon
+        
+        if diff > 180.0:
+            offset -= 360.0
+            raw_lon -= 360.0
+        elif diff < -180.0:
+            offset += 360.0
+            raw_lon += 360.0
+            
+        unwrapped.append([lat, round(raw_lon, 5)])
+        prev_lon = raw_lon
+
+    return unwrapped
 
 def chaikin_smooth(points, iterations=3):
     if not points or len(points) < 3:
@@ -138,6 +173,9 @@ def chaikin_smooth(points, iterations=3):
         current = next_pts
     return current
 
+# ==============================================================================
+# 3. 動的カバレッジ生成
+# ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage from historical points...")
     url = f"{GAS_URL}?api=coverage_points"
@@ -167,11 +205,13 @@ def generate_dynamic_coverage(session):
     except Exception as e:
         print("Error in dynamic coverage:", e)
 
+# ==============================================================================
+# 4. メイン処理
+# ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
 
-    # 1. 各船ごとの時系列航跡を取得して処理
     tracks_url = f"{GAS_URL}?api=ship_tracks"
     print(f"Fetching ship tracks from: {tracks_url}")
     res = session.get(tracks_url, allow_redirects=True, timeout=90)
@@ -185,21 +225,22 @@ def main():
             cat = ship.get("cat", "日本支配船")
             raw_pts = ship.get("points", [])
 
-            # 重複点の除去と距離チェック
             cleaned_pts = []
             for p in raw_pts:
+                lat, lon = p[0], p[1]
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    continue
                 if not cleaned_pts:
-                    cleaned_pts.append(p)
+                    cleaned_pts.append([lat, lon])
                 else:
                     last = cleaned_pts[-1]
-                    dist = math.hypot(p[0] - last[0], p[1] - last[1])
-                    if dist > 0.001 and dist < 15.0: # 微小ノイズと異常ワープを除去
-                        cleaned_pts.append(p)
+                    dist = math.hypot(lat - last[0], lon - last[1])
+                    if dist > 0.001:
+                        cleaned_pts.append([lat, lon])
 
             if len(cleaned_pts) < 2:
                 continue
 
-            # 各区間を海路補間して一本の連続航跡に結合
             full_track = []
             for i in range(len(cleaned_pts) - 1):
                 p1 = cleaned_pts[i]
@@ -210,10 +251,11 @@ def main():
                 else:
                     full_track.extend(seg[1:])
 
-            # 滑らかに平滑化
-            smooth_track = chaikin_smooth(full_track, iterations=3)
-            # ★ 最終点は確実に最新の検知位置（〇）に強制一致させる
-            smooth_track[-1] = [cleaned_pts[-1][0], cleaned_pts[-1][1]]
+            unwrapped_track = unwrap_coordinates(full_track)
+            smooth_track = chaikin_smooth(unwrapped_track, iterations=3)
+
+            if unwrapped_track:
+                smooth_track[-1] = unwrapped_track[-1]
 
             processed_tracks.append({
                 "mmsi": mmsi,
@@ -226,9 +268,8 @@ def main():
     output_path = "data/routes_2026.json"
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
-    print(f"前処理完了: {len(processed_tracks)} 隻の連続航跡を出力しました。")
+    print(f"前処理完了: {len(processed_tracks)} 隻の航跡を出力しました（外洋航路補間適用済）。")
 
-    # 2. 動的カバレッジの生成
     generate_dynamic_coverage(session)
 
 if __name__ == "__main__":
