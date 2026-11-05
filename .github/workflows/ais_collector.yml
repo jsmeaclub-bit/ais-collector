@@ -2,9 +2,9 @@ name: Scheduled AIS Collection & Route Update
 
 on:
   schedule:
-    # 毎時0分と30分の30分間隔で定期実行（必要に応じて間隔は調整可能）
+    # 毎時0分と30分の30分間隔で定期実行
     - cron: '*/30 * * * *'
-  workflow_dispatch: # 手動実行ボタンも維持
+  workflow_dispatch:
 
 permissions:
   contents: write
