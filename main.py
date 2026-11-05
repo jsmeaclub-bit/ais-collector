@@ -24,10 +24,15 @@ except Exception as e:
     print(f"Failed to load MMSI list: {e}")
 
 async def collect_ais():
-    # --- 2. BoundingBoxを全世界に設定（極地から極地まで） ---
+# BoundingBoxを主要海域に絞って分割指定（通信パンク回避）
     subscribe_message = {
         "APIKey": AIS_KEY,
-        "BoundingBoxes": [[[-90, -180], [90, 180]]],
+        "BoundingBoxes": [
+            [[-10, 95], [45, 145]],   # 東アジア〜東南アジア (日本, 台湾, シンガポール, マラッカ海峡)
+            [[10, -100], [50, -50]],  # 北米東海岸・メキシコ湾・パナマ運河
+            [[30, -10], [60, 30]],    # 欧州・地中海・ジブラルタル海峡
+            [[10, 30], [30, 60]]      # 中東・紅海・スエズ運河・ペルシャ湾
+        ],
         "FilterMessageTypes": ["PositionReport"]
     }
     
