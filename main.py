@@ -1,87 +1,88 @@
-import asyncio
-import json
 import os
-import requests
+import json
+import asyncio
 import websockets
+import requests
+from datetime import datetime
 
-# =============================================================
-# 1. 環境設定
-# =============================================================
-AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
-GAS_WEBAPP_URL = os.environ.get("GAS_WEBAPP_URL")
+# 環境変数からキーとURLを取得
+AIS_KEY = os.environ.get("AISSTREAM_API_KEY")
+GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 
-# =============================================================
-# 2. AISStream からデータを受信（約3分間）
-# =============================================================
-collected_vessels = {}
-
+# --- 1. GASから監視対象のMMSIリストを取得 ---
+print("Fetching target MMSI list from GAS...")
+mmsi_url = GAS_URL + "?action=get_mmsi"
+target_mmsis = set()
+try:
+    res = requests.get(mmsi_url, allow_redirects=True, timeout=30)
+    if res.status_code == 200:
+        target_mmsis = set(res.json())
+        print(f"Target MMSIs loaded: {len(target_mmsis)} vessels.")
+    else:
+        print(f"Error fetching MMSI: HTTP {res.status_code}")
+except Exception as e:
+    print(f"Failed to load MMSI list: {e}")
 
 async def collect_ais():
-  # 監視海域: シンガポール・マラッカ海峡周辺
-  bounding_boxes = [[[1.0, 103.0], [1.5, 104.5]]]
+    # --- 2. BoundingBoxを全世界に設定（極地から極地まで） ---
+    subscribe_message = {
+        "APIKey": AIS_KEY,
+        "BoundingBoxes": [[[-90, -180], [90, 180]]],
+        "FilterMessageTypes": ["PositionReport"]
+    }
+    
+    target_vessels = {}
+    timeout_seconds = 180  # 3分間ストリームを受信
+    
+    print("Connecting to AIS Stream (Global)...")
+    try:
+        async with websockets.connect("wss://stream.aisstream.io/v0/stream") as ws:
+            await ws.send(json.dumps(subscribe_message))
+            start_time = datetime.now()
+            
+            while (datetime.now() - start_time).seconds < timeout_seconds:
+                try:
+                    # 1秒ごとにメッセージを待機
+                    message = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    data = json.loads(message)
+                    
+                    if data.get("MessageType") == "PositionReport":
+                        report = data["Message"]["PositionReport"]
+                        mmsi = str(report.get("UserID", ""))
+                        
+                        # --- 3. 圧縮判定: リストにあるMMSIだけを辞書に上書き保存（重複排除） ---
+                        if mmsi in target_mmsis:
+                            target_vessels[mmsi] = {
+                                "MMSI": mmsi,
+                                "Latitude": report.get("Latitude", 0),
+                                "Longitude": report.get("Longitude", 0),
+                                "Speed": report.get("Sog", 0),
+                                "ShipName": "-" # 名前はGAS側でマスタから補完
+                            }
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    print(f"Parse error: {e}")
+                    continue
+                    
+    except Exception as e:
+        print(f"WebSocket Connection error: {e}")
 
-  subscribe_message = {
-      "APIKey": AISSTREAM_API_KEY,
-      "BoundingBoxes": bounding_boxes,
-      "FilterMessageTypes": ["PositionReport"],
-  }
-
-  uri = "wss://stream.aisstream.io/v0/stream"
-
-  try:
-    async with websockets.connect(uri) as websocket:
-      await websocket.send(json.dumps(subscribe_message))
-      print("■ AISStream に接続しました。データ受信中...")
-
-      # 180秒（3分間）データを蓄積
-      end_time = asyncio.get_event_loop().time() + 180
-
-      while asyncio.get_event_loop().time() < end_time:
+    # --- 4. GASへ圧縮済みデータをPOST ---
+    payload = list(target_vessels.values())
+    print(f"Collection finished. Sending {len(payload)} matched vessels to GAS.")
+    
+    if payload:
         try:
-          message_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-          msg = json.loads(message_json)
+            post_res = requests.post(GAS_URL, json=payload, headers={'Content-Type': 'application/json'}, allow_redirects=True)
+            print(f"GAS Response: {post_res.status_code}")
+        except Exception as e:
+            print(f"Failed to post to GAS: {e}")
+    else:
+        print("No target vessels found in this batch.")
 
-          if msg.get("MessageType") == "PositionReport":
-            pos = msg["Message"]["PositionReport"]
-            mmsi = msg["MetaData"]["MMSI"]
-            ship_name = msg["MetaData"].get("ShipName", "Unknown")
-
-            collected_vessels[mmsi] = {
-                "MMSI": mmsi,
-                "ShipName": ship_name.strip(),
-                "Latitude": pos["Latitude"],
-                "Longitude": pos["Longitude"],
-                "Speed": pos["Sog"],
-            }
-        except asyncio.TimeoutError:
-          continue
-
-  except Exception as e:
-    print(f"受信終了またはエラー: {e}")
-
-
-# =============================================================
-# 3. GASのWebアプリURLへデータを送信
-# =============================================================
-def send_to_gas():
-  if not collected_vessels:
-    print("受信データが0件のため送信をスキップします。")
-    return
-
-  payload = list(collected_vessels.values())
-  print(f"■ GASへ送信中...（対象隻数: {len(payload)} 隻）")
-
-  try:
-    response = requests.post(GAS_WEBAPP_URL, json=payload, timeout=30)
-    print(f"■ 送信結果: {response.status_code}")
-    print(f"■ 応答内容: {response.text}")
-  except Exception as e:
-    print(f"GAS送信エラー: {e}")
-
-
-# =============================================================
-# 4. 実行
-# =============================================================
 if __name__ == "__main__":
-  asyncio.run(collect_ais())
-  send_to_gas()
+    if not target_mmsis:
+        print("No target MMSI found. Exiting to prevent full global processing.")
+    else:
+        asyncio.run(collect_ais())
