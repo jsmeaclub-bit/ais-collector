@@ -21,7 +21,9 @@ GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
 if not GAS_URL:
     raise ValueError("エラー: 環境変数 GAS_WEBHOOK_URL が設定されていません。")
 
+# ==============================================================================
 # 1. 沿岸狭水路ネットワーク
+# ==============================================================================
 MARITIME_NODES = {
     "IYO_WEST":     (33.650, 132.200), "IYO_MID":      (33.800, 132.500), "AKI_NADA":     (34.120, 132.700),
     "SAI_WEST":     (34.050, 132.800), "SAI_MID":      (34.090, 132.880), "NOMA_OFF":     (34.135, 132.930),
@@ -90,7 +92,9 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
             return route
     return None
 
-# 2. 海洋航路計算と高精度スムージング
+# ==============================================================================
+# 2. 海洋航路計算と高精度スムージング（曲線生成）
+# ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
@@ -155,7 +159,9 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     theta = math.atan2(y, x)
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
+# ==============================================================================
 # 3. 動的カバレッジ生成 ＆ 最新船舶データキャッシュ生成
+# ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage...")
     url = f"{GAS_URL}?api=coverage_points"
@@ -194,7 +200,9 @@ def cache_latest_summary(session):
     except Exception as e:
         print("Note: latest cache skipped:", e)
 
+# ==============================================================================
 # 4. メイン処理（バックエンド側での高負荷タスク集中）
+# ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
@@ -231,8 +239,11 @@ def main():
 
             unwrapped_track = unwrap_coordinates(full_track)
             
-            # ★ 1. データの省力化（間引き）を撤廃し、高品質な曲線を生成
+            # ★ 1. 直線間引きを撤廃し、高品質な曲線を生成
             curved_track = chaikin_smooth(unwrapped_track, iterations=3)
+
+            if len(curved_track) < 2:
+                continue
 
             # ★ 2. ブラウザの負担を消すため、透過度・線幅・セグメント分割をPythonで事前計算
             total_pts = len(curved_track)
@@ -272,7 +283,7 @@ def main():
                 "coords": curved_track,        # 背景の薄い線用
                 "segments": fade_segments,     # 描画用（計算済グラデーション配列）
                 "heading": heading,
-                "last_point": curved_track[-1] if curved_track else None
+                "last_point": curved_track[-1]
             })
 
     with open("data/routes_2026.json", "w", encoding="utf-8") as f:
