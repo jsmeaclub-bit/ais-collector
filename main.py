@@ -11,13 +11,13 @@ import searoute as sr
 
 try:
     import shapely
-    from shapely.geometry import Point, mapping
+    from shapely.geometry import Point, LineString, Polygon, mapping
     from shapely.ops import unary_union
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely"])
     import shapely
-    from shapely.geometry import Point, mapping
+    from shapely.geometry import Point, LineString, Polygon, mapping
     from shapely.ops import unary_union
 
 GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
@@ -28,7 +28,23 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 1. 沿岸狭水路ネットワーク
+# 1. 幾何学陸地障害物ポリゴン（Shapely図形交差判定用）
+# ==============================================================================
+LAND_OBSTACLES = unary_union([
+    # 羽田空港（D滑走路含む）
+    Polygon([(139.74, 35.52), (139.835, 35.52), (139.835, 35.575), (139.74, 35.575)]),
+    # 川崎臨海部・扇島・浮島・水江町
+    Polygon([(139.69, 35.48), (139.79, 35.48), (139.79, 35.54), (139.69, 35.54)]),
+    # 横浜港・本牧・大黒埠頭基部
+    Polygon([(139.63, 35.41), (139.70, 35.41), (139.70, 35.48), (139.63, 35.48)]),
+    # 房総半島西岸（木更津・君津・富津）
+    Polygon([(139.81, 35.10), (140.15, 35.10), (140.15, 35.55), (139.95, 35.55), (139.81, 35.32)]),
+    # 三浦半島東岸（横須賀・観音崎）
+    Polygon([(139.55, 35.10), (139.725, 35.10), (139.725, 35.35), (139.55, 35.35)])
+])
+
+# ==============================================================================
+# 2. 海上安全水路ネットワーク（陸地を一切踏まない航路ノード）
 # ==============================================================================
 MARITIME_NODES = {
     # 瀬戸内海
@@ -40,23 +56,46 @@ MARITIME_NODES = {
     "HARIMA_MID":   (34.500, 134.600), "AKASHI_STR":   (34.610, 135.010), "OSAKA_BAY":    (34.550, 135.250),
     "KII_STR":      (34.100, 134.900),
     
-    # 浦賀水道・主要海峡（湾奥には過剰な引き込みを作らない）
-    "TYO_ENT":      (34.950, 139.750), # 浦賀水道南口
-    "URAGA_CH":     (35.220, 139.730), # 浦賀水道航路
-    
+    # 東京湾（水域のみを厳密に結ぶノード）
+    "URAGA_S":      (35.150, 139.730), # 浦賀水道南口外洋
+    "URAGA_N":      (35.250, 139.730), # 浦賀水道航路内
+    "TYO_MID":      (35.400, 139.810), # 東京湾中央（中ノ瀬北方海域）
+    "YOKOHAMA_OFF": (35.435, 139.710), # 横浜本牧・大黒沖合
+    "KAWASAKI_OFF": (35.485, 139.805), # 川崎扇島沖合
+    "HANEDA_OFF":   (35.545, 139.845), # 羽田D滑走路東側沖合水域
+    "TOKYO_ENT":    (35.590, 139.820), # 東京港航路進入点
+    "TOKYO_INN":    (35.615, 139.780), # 東京港内（品川沖）
+    "CHIBA_OFF":    (35.540, 140.000), # 千葉港沖合
+    "KISARAZU_OFF": (35.410, 139.910), # 木更津沖合
+
     # 海外狭水路
     "VN_OFFSHORE":  (10.250, 107.030), "VN_ENTRANCE":  (10.380, 107.030), "VN_CMIT_S":    (10.490, 107.020),
     "VN_CMIT_N":    (10.550, 107.015), "VN_THIVAI_UP": (10.600, 107.005),
 }
 
 MARITIME_EDGES = [
+    # 瀬戸内海
     ("IYO_WEST", "IYO_MID"), ("IYO_MID", "SAI_WEST"), ("IYO_MID", "AKI_NADA"), ("AKI_NADA", "SAI_MID"), 
     ("SAI_WEST", "SAI_MID"), ("SAI_MID", "NOMA_OFF"), ("NOMA_OFF", "OGE_SETO"), ("OGE_SETO", "KURUSHIMA_W"), 
     ("KURUSHIMA_W", "KURUSHIMA_BRG"), ("KURUSHIMA_BRG", "KURUSHIMA_E"), ("KURUSHIMA_E", "HUCHI_W"), 
     ("HUCHI_W", "HUCHI_MID"), ("HUCHI_MID", "BISAN_W"), ("BISAN_W", "BISAN_MID"), ("BISAN_MID", "BISAN_E"),
     ("BISAN_E", "HARIMA_MID"), ("HARIMA_MID", "AKASHI_STR"), ("AKASHI_STR", "OSAKA_BAY"),
     ("HARIMA_MID", "KII_STR"), ("OSAKA_BAY", "KII_STR"),
-    ("TYO_ENT", "URAGA_CH"),
+    
+    # 東京湾海上ルート
+    ("URAGA_S", "URAGA_N"),
+    ("URAGA_N", "TYO_MID"),
+    ("TYO_MID", "YOKOHAMA_OFF"),
+    ("TYO_MID", "KAWASAKI_OFF"),
+    ("TYO_MID", "KISARAZU_OFF"),
+    ("TYO_MID", "CHIBA_OFF"),
+    ("YOKOHAMA_OFF", "KAWASAKI_OFF"),
+    ("KAWASAKI_OFF", "HANEDA_OFF"),
+    ("HANEDA_OFF", "TOKYO_ENT"),
+    ("TOKYO_ENT", "TOKYO_INN"),
+    ("HANEDA_OFF", "CHIBA_OFF"),
+
+    # 海外
     ("VN_OFFSHORE", "VN_ENTRANCE"), ("VN_ENTRANCE", "VN_CMIT_S"), 
     ("VN_CMIT_S", "VN_CMIT_N"), ("VN_CMIT_N", "VN_THIVAI_UP"),
 ]
@@ -68,13 +107,16 @@ for u, v in MARITIME_EDGES:
     GRAPH[u].append((v, dist))
     GRAPH[v].append((u, dist))
 
-def find_nearest_node(lat, lon, max_dist_deg=0.18):
+def find_nearest_safe_node(lat, lon, max_dist_deg=0.45):
+    """陸地ポリゴンを跨がずに直結できる最も近い海上ノードを探索"""
     nearest, min_dist = None, float("inf")
     for name, (n_lat, n_lon) in MARITIME_NODES.items():
         d = math.hypot(lat - n_lat, lon - n_lon)
-        if d < min_dist:
-            min_dist, nearest = d, name
-    return nearest if min_dist <= max_dist_deg else None
+        if d < min_dist and d <= max_dist_deg:
+            connect_line = LineString([(lon, lat), (n_lon, n_lat)])
+            if not connect_line.intersects(LAND_OBSTACLES):
+                min_dist, nearest = d, name
+    return nearest
 
 def dijkstra_shortest_path(start_node, end_node):
     if start_node == end_node: return [MARITIME_NODES[start_node]]
@@ -92,7 +134,8 @@ def dijkstra_shortest_path(start_node, end_node):
     return None
 
 def resolve_graph_route(lat1, lon1, lat2, lon2):
-    n1, n2 = find_nearest_node(lat1, lon1), find_nearest_node(lat2, lon2)
+    n1 = find_nearest_safe_node(lat1, lon1)
+    n2 = find_nearest_safe_node(lat2, lon2)
     if n1 and n2 and n1 != n2:
         path_nodes = dijkstra_shortest_path(n1, n2)
         if path_nodes:
@@ -106,16 +149,18 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
     return None
 
 # ==============================================================================
-# 2. 図形処理による幾何航路計算（湾内短絡の排除）
+# 3. 図形処理による幾何航路計算（陸地交差の完全防止）
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
-    dist_deg = math.hypot(lat1 - lat2, lon1 - lon2)
+    direct_line = LineString([(lon1, lat1), (lon2, lat2)])
     
-    # 図形判定: 2点間が約25km以内（同一湾内・港内）の場合は実測線をそのまま採用
-    if dist_deg < 0.22:
-        return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
+    # ★図形判定: 陸地ポリゴンと一切交差せず、かつ近距離であれば実測直線を許可
+    if not direct_line.intersects(LAND_OBSTACLES):
+        dist_deg = math.hypot(lat1 - lat2, lon1 - lon2)
+        if dist_deg < 0.20:
+            return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
 
-    # 狭水路ネットワーク判定
+    # 陸地と交差する場合、または長距離の場合は海上グラフで迂回
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
         return graph_route
@@ -182,7 +227,7 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 3. 基礎データ取得
+# 4. 基礎データ取得
 # ==============================================================================
 def fetch_base_data_from_gas(session):
     print("Fetching target MMSIs and historical tracks from GAS...")
@@ -215,7 +260,7 @@ def fetch_base_data_from_gas(session):
     return target_mmsis, existing_tracks, base_latest
 
 # ==============================================================================
-# 4. AIS受信 (180秒)
+# 5. AIS受信 (180秒)
 # ==============================================================================
 async def collect_ais_data(target_mmsis, duration_sec=180):
     uri = "wss://stream.aisstream.io/v0/stream"
@@ -296,7 +341,7 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
     return valid_ships
 
 # ==============================================================================
-# 5. 完全同期幾何計算
+# 6. 完全同期幾何計算（先端アンカー結合）
 # ==============================================================================
 def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     print("Synchronizing received AIS points...")
@@ -410,7 +455,7 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     return synchronized_latest_data, processed_tracks
 
 # ==============================================================================
-# 6. カバレッジ生成
+# 7. カバレッジ生成
 # ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage...")
@@ -438,7 +483,7 @@ def generate_dynamic_coverage(session):
         print("Error in dynamic coverage:", e)
 
 # ==============================================================================
-# 7. メイン実行フロー
+# 8. メイン実行フロー
 # ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
