@@ -31,14 +31,20 @@ if not GAS_URL or not API_KEY:
 # 1. 沿岸狭水路ネットワーク
 # ==============================================================================
 MARITIME_NODES = {
+    # 瀬戸内海
     "IYO_WEST":     (33.650, 132.200), "IYO_MID":      (33.800, 132.500), "AKI_NADA":     (34.120, 132.700),
     "SAI_WEST":     (34.050, 132.800), "SAI_MID":      (34.090, 132.880), "NOMA_OFF":     (34.135, 132.930),
     "OGE_SETO":     (34.168, 132.970), "KURUSHIMA_W":  (34.138, 133.002), "KURUSHIMA_BRG":(34.118, 133.015),
     "KURUSHIMA_E":  (34.092, 133.045), "HUCHI_W":      (34.110, 133.100), "HUCHI_MID":    (34.200, 133.350),
     "BISAN_W":      (34.330, 133.650), "BISAN_MID":    (34.380, 133.850), "BISAN_E":      (34.420, 134.150),
     "HARIMA_MID":   (34.500, 134.600), "AKASHI_STR":   (34.610, 135.010), "OSAKA_BAY":    (34.550, 135.250),
-    "KII_STR":      (34.100, 134.900), "TYO_ENT":      (34.950, 139.750), "URAGA_CH":     (35.220, 139.730),
-    "TYO_MID":      (35.450, 139.850), "TYO_INN_W":    (35.580, 139.800), "TYO_INN_E":    (35.580, 139.980),
+    "KII_STR":      (34.100, 134.900),
+    
+    # 浦賀水道・主要海峡（湾奥には過剰な引き込みを作らない）
+    "TYO_ENT":      (34.950, 139.750), # 浦賀水道南口
+    "URAGA_CH":     (35.220, 139.730), # 浦賀水道航路
+    
+    # 海外狭水路
     "VN_OFFSHORE":  (10.250, 107.030), "VN_ENTRANCE":  (10.380, 107.030), "VN_CMIT_S":    (10.490, 107.020),
     "VN_CMIT_N":    (10.550, 107.015), "VN_THIVAI_UP": (10.600, 107.005),
 }
@@ -49,9 +55,10 @@ MARITIME_EDGES = [
     ("KURUSHIMA_W", "KURUSHIMA_BRG"), ("KURUSHIMA_BRG", "KURUSHIMA_E"), ("KURUSHIMA_E", "HUCHI_W"), 
     ("HUCHI_W", "HUCHI_MID"), ("HUCHI_MID", "BISAN_W"), ("BISAN_W", "BISAN_MID"), ("BISAN_MID", "BISAN_E"),
     ("BISAN_E", "HARIMA_MID"), ("HARIMA_MID", "AKASHI_STR"), ("AKASHI_STR", "OSAKA_BAY"),
-    ("HARIMA_MID", "KII_STR"), ("OSAKA_BAY", "KII_STR"), ("TYO_ENT", "URAGA_CH"), ("URAGA_CH", "TYO_MID"), 
-    ("TYO_MID", "TYO_INN_W"), ("TYO_MID", "TYO_INN_E"), ("VN_OFFSHORE", "VN_ENTRANCE"), 
-    ("VN_ENTRANCE", "VN_CMIT_S"), ("VN_CMIT_S", "VN_CMIT_N"), ("VN_CMIT_N", "VN_THIVAI_UP"),
+    ("HARIMA_MID", "KII_STR"), ("OSAKA_BAY", "KII_STR"),
+    ("TYO_ENT", "URAGA_CH"),
+    ("VN_OFFSHORE", "VN_ENTRANCE"), ("VN_ENTRANCE", "VN_CMIT_S"), 
+    ("VN_CMIT_S", "VN_CMIT_N"), ("VN_CMIT_N", "VN_THIVAI_UP"),
 ]
 
 GRAPH = {node: [] for node in MARITIME_NODES}
@@ -61,7 +68,7 @@ for u, v in MARITIME_EDGES:
     GRAPH[u].append((v, dist))
     GRAPH[v].append((u, dist))
 
-def find_nearest_node(lat, lon, max_dist_deg=0.45):
+def find_nearest_node(lat, lon, max_dist_deg=0.18):
     nearest, min_dist = None, float("inf")
     for name, (n_lat, n_lon) in MARITIME_NODES.items():
         d = math.hypot(lat - n_lat, lon - n_lon)
@@ -86,7 +93,7 @@ def dijkstra_shortest_path(start_node, end_node):
 
 def resolve_graph_route(lat1, lon1, lat2, lon2):
     n1, n2 = find_nearest_node(lat1, lon1), find_nearest_node(lat2, lon2)
-    if n1 and n2:
+    if n1 and n2 and n1 != n2:
         path_nodes = dijkstra_shortest_path(n1, n2)
         if path_nodes:
             route = [[lat1, lon1]]
@@ -99,12 +106,21 @@ def resolve_graph_route(lat1, lon1, lat2, lon2):
     return None
 
 # ==============================================================================
-# 2. 航路計算・平滑化・方位角計算
+# 2. 図形処理による幾何航路計算（湾内短絡の排除）
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
+    dist_deg = math.hypot(lat1 - lat2, lon1 - lon2)
+    
+    # 図形判定: 2点間が約25km以内（同一湾内・港内）の場合は実測線をそのまま採用
+    if dist_deg < 0.22:
+        return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
+
+    # 狭水路ネットワーク判定
     graph_route = resolve_graph_route(lat1, lon1, lat2, lon2)
     if graph_route and len(graph_route) >= 2:
         return graph_route
+
+    # 外洋航路計算
     try:
         route = sr.searoute([lon1, lat1], [lon2, lat2], units="km")
         if route and "geometry" in route and "coordinates" in route["geometry"]:
@@ -113,6 +129,7 @@ def calculate_sea_route(lat1, lon1, lat2, lon2):
                 return coords
     except Exception:
         pass
+
     return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
 
 def unwrap_coordinates(coords):
@@ -165,10 +182,10 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(theta) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 3. GASからの基礎データ取得
+# 3. 基礎データ取得
 # ==============================================================================
 def fetch_base_data_from_gas(session):
-    print("Fetching target MMSIs, base latest data, and history tracks from GAS...")
+    print("Fetching target MMSIs and historical tracks from GAS...")
     mmsi_url = f"{GAS_URL}?api=mmsi"
     tracks_url = f"{GAS_URL}?api=ship_tracks"
     latest_url = f"{GAS_URL}?api=latest"
@@ -198,7 +215,7 @@ def fetch_base_data_from_gas(session):
     return target_mmsis, existing_tracks, base_latest
 
 # ==============================================================================
-# 4. AISStream.io からのリアルタイム受信 (180秒)
+# 4. AIS受信 (180秒)
 # ==============================================================================
 async def collect_ais_data(target_mmsis, duration_sec=180):
     uri = "wss://stream.aisstream.io/v0/stream"
@@ -273,16 +290,16 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
                     continue
 
     except Exception as e:
-        print(f"WebSocket connection error: {e}")
+        print(f"WebSocket error: {e}")
 
     valid_ships = [s for s in ships_data.values() if s["lat"] is not None and s["lng"] is not None]
     return valid_ships
 
 # ==============================================================================
-# 5. 受信データを最先端として直結・完全同期計算
+# 5. 完全同期幾何計算
 # ==============================================================================
 def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
-    print("Synchronizing received AIS points directly to track endpoints...")
+    print("Synchronizing received AIS points...")
     
     latest_list = base_latest.get("latest", [])
     latest_map = {str(s["mmsi"]): s for s in latest_list}
@@ -326,7 +343,6 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         if mmsi in existing_tracks:
             pts = existing_tracks[mmsi]["points"][:]
         
-        # 今回の最新位置を必ず末尾へ接合
         if not pts or (pts[-1][0] != lat or pts[-1][1] != lng):
             pts.append([lat, lng])
 
@@ -351,7 +367,7 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         unwrapped_track = unwrap_coordinates(full_track)
         curved_track = chaikin_smooth(unwrapped_track, iterations=3)
 
-        # ★先端アンカー固定：平滑化による丸まりを防ぎ、確実に最新位置と一致させる
+        # 先端アンカー固定
         curved_track[-1] = [lat, lng]
 
         total_pts = len(curved_track)
@@ -394,7 +410,7 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     return synchronized_latest_data, processed_tracks
 
 # ==============================================================================
-# 6. 動的カバレッジ生成
+# 6. カバレッジ生成
 # ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage...")
@@ -428,33 +444,27 @@ def main():
     os.makedirs("data", exist_ok=True)
     session = requests.Session()
 
-    # 1. 基礎データ取得
     target_mmsis, existing_tracks, base_latest = fetch_base_data_from_gas(session)
     if not target_mmsis:
         print("No target MMSIs loaded. Exiting.")
         sys.exit(0)
 
-    # 2. 180秒データ収集
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     new_ships = loop.run_until_complete(collect_ais_data(target_mmsis, duration_sec=180))
 
-    # 3. 軌跡・最新位置を完全同期で一括事前計算
     synchronized_latest, processed_tracks = process_and_synchronize_tracks(
         new_ships, existing_tracks, base_latest
     )
 
-    # 4. JSONキャッシュを出力
     with open("data/latest_2026.json", "w", encoding="utf-8") as f:
         json.dump(synchronized_latest, f, ensure_ascii=False, separators=(',', ':'))
     with open("data/routes_2026.json", "w", encoding="utf-8") as f:
         json.dump(processed_tracks, f, ensure_ascii=False, separators=(',', ':'))
     print(f"data/routes_2026.json cached ({len(processed_tracks)} tracks).")
 
-    # 5. カバレッジ生成
     generate_dynamic_coverage(session)
 
-    # 6. GASスプレッドシートへバックアップ更新
     if new_ships:
         print(f"Posting {len(new_ships)} ships to GAS...")
         try:
