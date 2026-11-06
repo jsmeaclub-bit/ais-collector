@@ -33,37 +33,49 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 1. 陸地障害物ポリゴン（クロス判定用）
+# 1. 東京湾 高解像度ポリゴン（運河を精密に開通させた障害物定義）
 # ==============================================================================
-LAND_OBSTACLES = unary_union([
-    Polygon([(139.735, 35.520), (139.835, 35.520), (139.835, 35.575), (139.735, 35.575)]), # 羽田空港
-    Polygon([(139.710, 35.480), (139.790, 35.480), (139.790, 35.515), (139.710, 35.515)]), # 川崎
-    Polygon([(139.650, 35.410), (139.700, 35.410), (139.700, 35.460), (139.650, 35.460)]), # 横浜
-    Polygon([(139.810, 35.200), (140.100, 35.200), (140.100, 35.550), (139.810, 35.550)]), # 房総半島
-])
+# 本土と人工島を分けて定義し、間に「運河（水路）」を確保する
+TOKYO_BAY_POLYGONS = [
+    # 西側本土（横浜〜川崎〜東京の内陸）
+    [(139.50, 35.20), (139.65, 35.20), (139.65, 35.40), (139.50, 35.40)],
+    [(139.50, 35.40), (139.67, 35.40), (139.67, 35.46), (139.50, 35.46)],
+    [(139.50, 35.46), (139.72, 35.46), (139.72, 35.52), (139.50, 35.52)],
+    [(139.50, 35.52), (139.75, 35.52), (139.75, 35.70), (139.50, 35.70)],
+    
+    # 人工島群（本土との隙間が運河になる）
+    [(139.68, 35.44), (139.70, 35.44), (139.70, 35.46), (139.68, 35.46)],       # 大黒ふ頭
+    [(139.70, 35.47), (139.74, 35.47), (139.74, 35.495), (139.70, 35.495)],     # 扇島
+    [(139.74, 35.495), (139.78, 35.495), (139.78, 35.51), (139.74, 35.51)],     # 東扇島
+    [(139.77, 35.515), (139.81, 35.515), (139.81, 35.535), (139.77, 35.535)],   # 浮島
+    [(139.74, 35.535), (139.84, 35.535), (139.84, 35.58), (139.74, 35.58)],     # 羽田空港
+    
+    # 東側本土（千葉・房総半島）
+    [(139.95, 35.50), (140.20, 35.50), (140.20, 35.70), (139.95, 35.70)],
+    [(139.90, 35.30), (140.20, 35.30), (140.20, 35.50), (139.90, 35.50)],
+    [(139.80, 35.10), (140.20, 35.10), (140.20, 35.30), (139.80, 35.30)]
+]
+
+# Shapely交差判定用
+LAND_OBSTACLES = unary_union([Polygon(poly) for poly in TOKYO_BAY_POLYGONS])
 
 # ==============================================================================
-# 2. 画像処理ベースの確実な迂回ルート探索エンジン（クロス時の再描写用）
+# 2. 高解像度 画像処理ベース迂回エンジン (1000x1000px メッシュ)
 # ==============================================================================
-class RasterSeaRouter:
+class HighResRasterRouter:
     def __init__(self):
-        self.min_lat, self.max_lat = 35.15, 35.75
-        self.min_lon, self.max_lon = 139.55, 140.15
-        self.w, self.h = 400, 400
+        self.min_lat, self.max_lat = 35.20, 35.70
+        self.min_lon, self.max_lon = 139.50, 140.20
+        self.w, self.h = 1000, 1000 # 1px = 約40m（運河を完璧に捉える高解像度）
         self.mask = np.ones((self.h, self.w), dtype=np.uint8) * 255
         
-        obstacles = [
-            [(139.735, 35.520), (139.835, 35.520), (139.835, 35.575), (139.735, 35.575)],
-            [(139.710, 35.480), (139.790, 35.480), (139.790, 35.515), (139.710, 35.515)],
-            [(139.650, 35.410), (139.700, 35.410), (139.700, 35.460), (139.650, 35.460)],
-            [(139.810, 35.200), (140.100, 35.200), (140.100, 35.550), (139.810, 35.550)]
-        ]
-        for obs in obstacles:
+        for obs in TOKYO_BAY_POLYGONS:
             pts = [self.latlon_to_pixel(lat, lon) for lon, lat in obs]
             cv2.fillPoly(self.mask, [np.array(pts, np.int32)], 0)
 
+        # 陸地からの距離計算（水路の中央を強力に優先するコストマップ）
         dist = cv2.distanceTransform(self.mask, cv2.DIST_L2, 3)
-        self.cost_map = np.where(self.mask > 128, 1.0 + 20.0 / (dist + 1.0), np.inf)
+        self.cost_map = np.where(self.mask > 128, 1.0 + 100.0 / (dist + 1.0), np.inf)
 
     def latlon_to_pixel(self, lat, lon):
         x = int((lon - self.min_lon) / (self.max_lon - self.min_lon) * (self.w - 1))
@@ -75,7 +87,11 @@ class RasterSeaRouter:
         lat = self.max_lat - (y / (self.h - 1)) * (self.max_lat - self.min_lat)
         return round(lat, 5), round(lon, 5)
 
-    def _snap_to_sea(self, x, y, radius=10):
+    def _snap_to_sea(self, x, y, radius=30):
+        """
+        ★最重要処理: GPSが陸地(着岸中など)にある場合、半径1.2km以内の「最も近い海」に
+        強制的に引きずり込み、陸スタートによるエラーを排除する。
+        """
         if self.mask[y, x] > 128: return x, y
         best_x, best_y, min_d = x, y, float('inf')
         for dy in range(-radius, radius+1):
@@ -89,31 +105,37 @@ class RasterSeaRouter:
     def find_route(self, lat1, lon1, lat2, lon2):
         if not (self.min_lat <= lat1 <= self.max_lat and self.min_lon <= lon1 <= self.max_lon): return None
         if not (self.min_lat <= lat2 <= self.max_lat and self.min_lon <= lon2 <= self.max_lon): return None
+        
         sx, sy = self._snap_to_sea(*self.latlon_to_pixel(lat1, lon1))
         gx, gy = self._snap_to_sea(*self.latlon_to_pixel(lat2, lon2))
+        
         queue = [(0, sx, sy, [])]
         visited = {}
+        
         while queue:
             cost, x, y, path = heapq.heappop(queue)
             if (x, y) in visited and visited[(x, y)] <= cost: continue
             visited[(x, y)] = cost
             new_path = path + [(x, y)]
+            
             if abs(x - gx) <= 2 and abs(y - gy) <= 2:
-                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::4]]
+                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::5]]
                 return [[lat1, lon1]] + route + [[lat2, lon2]]
+                
             for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < self.w and 0 <= ny < self.h:
                     step_cost = self.cost_map[ny, nx]
                     if not np.isinf(step_cost):
-                        heuristic = math.hypot(gx - nx, gy - ny) * 1.2
+                        # 探索速度を上げるためヒューリスティック比重を高めに設定
+                        heuristic = math.hypot(gx - nx, gy - ny) * 2.5
                         heapq.heappush(queue, (cost + step_cost + heuristic, nx, ny, new_path))
         return None
 
-tokyo_router = RasterSeaRouter()
+tokyo_router = HighResRasterRouter()
 
 # ==============================================================================
-# 3. スプライン生成 ＆ 陸地クロスチェック・再描写プロセス
+# 3. 軌跡描画判定プロセス（スプライン vs 画像処理）
 # ==============================================================================
 def b_spline_core(unique_pts, s_val, num_points):
     pts_arr = np.array(unique_pts)
@@ -126,11 +148,25 @@ def b_spline_core(unique_pts, s_val, num_points):
     x_new[-1], y_new[-1] = x[-1], y[-1]
     return [[round(x_new[i], 5), round(y_new[i], 5)] for i in range(num_points)]
 
-def draw_and_check_spline(points, num_points=70):
+def chaikin_smooth(points, iterations=1):
+    """運河用のマイルドな平滑化（陸にめり込まない）"""
+    if not points or len(points) < 3: return points
+    current = points
+    for _ in range(iterations):
+        next_pts = [current[0]]
+        for i in range(len(current) - 1):
+            p0, p1 = current[i], current[i + 1]
+            next_pts.append([round(0.75*p0[0] + 0.25*p1[0], 5), round(0.75*p0[1] + 0.25*p1[1], 5)])
+            next_pts.append([round(0.25*p0[0] + 0.75*p1[0], 5), round(0.25*p0[1] + 0.75*p1[1], 5)])
+        next_pts.append(current[-1])
+        current = next_pts
+    return current
+
+def draw_and_check_route(points, num_points=70):
     """
-    【コアロジック】
-    スプラインを描画後、陸地をクロスしていないかチェックする。
-    クロスしている場合、陸を避けるルートで再描写する。
+    【スマート切り替えロジック】
+    外洋ではBスプライン曲線を適用し、陸地(東京湾)をクロスした瞬間に
+    Bスプラインを破棄して「画像処理ルート＋角を落とすだけのChaikin」へ移行する。
     """
     if len(points) < 3: return resample_path_linear(points, num_points)
     
@@ -141,21 +177,22 @@ def draw_and_check_spline(points, num_points=70):
     if len(unique_pts) < 3: return resample_path_linear(unique_pts, num_points)
 
     try:
-        # 1. まず自然なスプライン曲線を描く
+        # 1. まず自然なBスプライン曲線を描いてみる
         curve = b_spline_core(unique_pts, s_val=0.002, num_points=num_points)
         curve_line = LineString(curve)
         
         # 2. 陸地（ポリゴン）をクロスしていないかチェック
         if not curve_line.intersects(LAND_OBSTACLES):
-            return curve # クロスしていなければそのまま確定
+            return curve # 陸を避けていれば曲線確定
 
-        # 3. クロスしていた場合、画像処理(A*)で絶対に陸を避けるルートを引き直す
+        # 3. 陸地をクロス（食い込み）した場合、運河専用の高解像度A*ルーターを使用
         start, end = unique_pts[0], unique_pts[-1]
         safe_pixel_route = tokyo_router.find_route(start[0], start[1], end[0], end[1])
         
         if safe_pixel_route and len(safe_pixel_route) >= 3:
-            # 安全なルートに食い込まないよう、テンションを強くして再描写
-            return b_spline_core(safe_pixel_route, s_val=0.0001, num_points=num_points)
+            # ★重要: 運河ルートにはBスプラインをかけず、マイルドなChaikinで角を少し丸めるだけに留める
+            canal_route = chaikin_smooth(safe_pixel_route, iterations=1)
+            return resample_path_linear(canal_route, num_points=num_points)
             
     except Exception:
         pass
@@ -264,8 +301,8 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         for i in range(len(cleaned_pts) - 1):
             full_track.extend(calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1])[1:] if full_track else calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1]))
 
-        # クロスチェック機能付きの安全な曲線描画を呼び出し
-        final_track = draw_and_check_spline(unwrap_coordinates(full_track), num_points=70)
+        # ★ 交差判定付き・動的フォールバック描画エンジン呼び出し
+        final_track = draw_and_check_route(unwrap_coordinates(full_track), num_points=70)
         final_track[-1] = [lat, lng]
 
         fade_segments = [{"coords": final_track[i:min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track))], "weight": round(1.0 + (2.8 * ((min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track)) / len(final_track)) ** 1.2)), 2), "opacity": round(0.06 + (0.89 * ((min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track)) / len(final_track)) ** 1.5)), 3)} for i in range(0, len(final_track) - 1, max(1, (len(final_track) - 1) // 14))]
