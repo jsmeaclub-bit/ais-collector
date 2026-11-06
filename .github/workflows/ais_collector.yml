@@ -2,7 +2,6 @@ name: Scheduled AIS Collection & Route Update
 
 on:
   schedule:
-    # 毎時0分と30分の30分間隔で定期実行
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -24,9 +23,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install websockets requests shapely searoute
+          pip install websockets requests shapely searoute opencv-python-headless numpy
 
-      # 収集・軌跡生成・完全同期キャッシュ生成を1本で実行（約3分20秒）
       - name: Run AIS Collector and Route Builder
         env:
           GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
@@ -34,7 +32,6 @@ jobs:
         run: |
           python main.py
 
-      # 生成された最新JSON（routes, coverage, latest）をGitHubへ反映
       - name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
