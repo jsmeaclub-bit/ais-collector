@@ -2,23 +2,19 @@ import os
 import sys
 import json
 import math
-import heapq
 import asyncio
 import datetime
 import websockets
 import requests
-import searoute as sr
 
 try:
-    import cv2
-    import numpy as np
+    import searoute as sr
     from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "shapely", "opencv-python-headless", "numpy"])
-    import cv2
-    import numpy as np
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
+    import searoute as sr
     from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 
@@ -30,114 +26,28 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 1. 画像処理ベースの海路探索エンジン (A* + 距離変換コストマップ)
-# ==============================================================================
-class RasterSeaRouter:
-    def __init__(self):
-        # 東京湾のカバー範囲
-        self.min_lat, self.max_lat = 35.15, 35.75
-        self.min_lon, self.max_lon = 139.55, 140.15
-        self.w, self.h = 500, 500  # 500x500ピクセルグリッド（約120m/px）
-        
-        self.mask_path = "data/tokyo_bay_mask.png"
-        
-        # ユーザーが用意した高精度マスク画像があれば使用し、無ければ自動生成
-        if os.path.exists(self.mask_path):
-            self.mask = cv2.imread(self.mask_path, cv2.IMREAD_GRAYSCALE)
-            self.mask = cv2.resize(self.mask, (self.w, self.h))
-        else:
-            self.mask = self._generate_fallback_mask()
-
-        # OpenCV距離変換: 陸地(黒=0)からの距離を計算し、水路の中央ほど安全(コスト低)にする
-        dist = cv2.distanceTransform(self.mask, cv2.DIST_L2, 3)
-        self.cost_map = np.where(self.mask > 128, 1.0 + 15.0 / (dist + 1.0), np.inf)
-
-    def _generate_fallback_mask(self):
-        """マスク画像がない場合の防波堤・空港ポリゴン自動生成（黒塗り）"""
-        img = np.ones((self.h, self.w), dtype=np.uint8) * 255
-        obstacles = [
-            [(139.735, 35.52), (139.835, 35.52), (139.835, 35.575), (139.735, 35.575)], # 羽田空港
-            [(139.710, 35.48), (139.790, 35.48), (139.790, 35.515), (139.710, 35.515)], # 川崎人工島群
-            [(139.650, 35.41), (139.700, 35.41), (139.700, 35.450), (139.650, 35.450)]  # 横浜本牧・大黒
-        ]
-        for obs in obstacles:
-            pts = [self.latlon_to_pixel(lat, lon) for lon, lat in obs]
-            cv2.fillPoly(img, [np.array(pts, np.int32)], 0)
-        return img
-
-    def latlon_to_pixel(self, lat, lon):
-        x = int((lon - self.min_lon) / (self.max_lon - self.min_lon) * (self.w - 1))
-        y = int((self.max_lat - lat) / (self.max_lat - self.min_lat) * (self.h - 1))
-        return max(0, min(self.w - 1, x)), max(0, min(self.h - 1, y))
-
-    def pixel_to_latlon(self, x, y):
-        lon = self.min_lon + (x / (self.w - 1)) * (self.max_lon - self.min_lon)
-        lat = self.max_lat - (y / (self.h - 1)) * (self.max_lat - self.min_lat)
-        return round(lat, 5), round(lon, 5)
-
-    def _snap_to_sea(self, x, y, radius=10):
-        """座標が陸地(黒)に落ちた場合、最寄りの海(白)へスナップする"""
-        if self.mask[y, x] > 128: return x, y
-        best_x, best_y, min_d = x, y, float('inf')
-        for dy in range(-radius, radius+1):
-            for dx in range(-radius, radius+1):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.w and 0 <= ny < self.h and self.mask[ny, nx] > 128:
-                    d = dx*dx + dy*dy
-                    if d < min_d:
-                        min_d, best_x, best_y = d, nx, ny
-        return best_x, best_y
-
-    def find_route(self, lat1, lon1, lat2, lon2):
-        if not (self.min_lat <= lat1 <= self.max_lat and self.min_lon <= lon1 <= self.max_lon): return None
-        if not (self.min_lat <= lat2 <= self.max_lat and self.min_lon <= lon2 <= self.max_lon): return None
-        
-        sx, sy = self._snap_to_sea(*self.latlon_to_pixel(lat1, lon1))
-        gx, gy = self._snap_to_sea(*self.latlon_to_pixel(lat2, lon2))
-
-        queue = [(0, sx, sy, [])]
-        visited = {}
-        
-        while queue:
-            cost, x, y, path = heapq.heappop(queue)
-            if (x, y) in visited and visited[(x, y)] <= cost: continue
-            visited[(x, y)] = cost
-            new_path = path + [(x, y)]
-
-            if abs(x - gx) <= 2 and abs(y - gy) <= 2:
-                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::4]]
-                return [[lat1, lon1]] + route + [[lat2, lon2]]
-
-            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.w and 0 <= ny < self.h:
-                    step_cost = self.cost_map[ny, nx]
-                    if not np.isinf(step_cost):
-                        heuristic = math.hypot(gx - nx, gy - ny)
-                        move_cost = step_cost * (1.414 if dx != 0 and dy != 0 else 1.0)
-                        heapq.heappush(queue, (cost + move_cost + heuristic, nx, ny, new_path))
-        return None
-
-tokyo_router = RasterSeaRouter()
-
-# ==============================================================================
-# 2. 統合航路計算（画像処理＋外洋）
+# 1. 航路計算・平滑化
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
-    # 1. 東京湾内であれば画像処理（A*探索）ルーティングを優先
-    img_route = tokyo_router.find_route(lat1, lon1, lat2, lon2)
-    if img_route and len(img_route) >= 2:
-        return img_route
+    """
+    全世界の陸地を避けるため、searouteライブラリを強制適用。
+    海上の最短ルートを自動探索し、陸を横切る直線化を防止する。
+    """
+    # 距離が極端に近い（約5km未満）場合はそのまま直線化（港内での微小なブレ対応）
+    if math.hypot(lat1 - lat2, lon1 - lon2) < 0.05:
+        return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
 
-    # 2. 外洋・長距離の場合はSearouteライブラリを使用
     try:
-        route = sr.searoute([lon1, lat1], [lon2, lat2], units="km")
+        # include_ports=True にすることで、港湾内の複雑な地形でもエラーになりにくい
+        route = sr.searoute([lon1, lat1], [lon2, lat2], units="km", include_ports=True)
         if route and "geometry" in route and "coordinates" in route["geometry"]:
             coords = [[round(pt[1], 4), round(pt[0], 4)] for pt in route["geometry"]["coordinates"]]
-            if len(coords) >= 2: return coords
-    except Exception:
-        pass
+            if len(coords) >= 2:
+                return coords
+    except Exception as e:
+        print(f"SeaRoute error ({lat1},{lon1} -> {lat2},{lon2}): {e}")
 
+    # searouteがどうしても失敗した場合のみ直線フォールバック
     return [[round(lat1, 4), round(lon1, 4)], [round(lat2, 4), round(lon2, 4)]]
 
 def unwrap_coordinates(coords):
@@ -149,8 +59,8 @@ def unwrap_coordinates(coords):
         lat, lon = coords[i][0], coords[i][1]
         raw_lon = lon + offset
         diff = raw_lon - prev_lon
-        if diff > 180.0: offset, raw_lon = offset - 360.0, raw_lon - 360.0
-        elif diff < -180.0: offset, raw_lon = offset + 360.0, raw_lon + 360.0
+        if diff > 180.0: offset -= 360.0; raw_lon -= 360.0
+        elif diff < -180.0: offset += 360.0; raw_lon += 360.0
         unwrapped.append([lat, round(raw_lon, 4)])
         prev_lon = raw_lon
     return unwrapped
@@ -183,7 +93,7 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(math.atan2(y, x)) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 3. 基礎データ取得
+# 2. 基礎データ取得
 # ==============================================================================
 def fetch_base_data_from_gas(session):
     print("Fetching target MMSIs and historical tracks from GAS...")
@@ -214,7 +124,7 @@ def fetch_base_data_from_gas(session):
     return target_mmsis, existing_tracks, base_latest
 
 # ==============================================================================
-# 4. AIS受信 (180秒)
+# 3. AIS受信 (180秒)
 # ==============================================================================
 async def collect_ais_data(target_mmsis, duration_sec=180):
     uri = "wss://stream.aisstream.io/v0/stream"
@@ -262,7 +172,7 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
     return [s for s in ships_data.values() if s["lat"] is not None and s["lng"] is not None]
 
 # ==============================================================================
-# 5. 完全同期幾何計算（先端アンカー結合）
+# 4. 完全同期幾何計算
 # ==============================================================================
 def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     latest_map = {str(s["mmsi"]): s for s in base_latest.get("latest", [])}
@@ -289,11 +199,12 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         pts = existing_tracks[mmsi]["points"][:] if mmsi in existing_tracks else []
         if not pts or (pts[-1][0] != lat or pts[-1][1] != lng): pts.append([lat, lng])
 
+        # 過剰な間引きを抑え、地形に沿ったポイントを保持する
         cleaned_pts = []
         for i, p in enumerate(pts):
             p_lat, p_lon = p[0], p[1]
             if not (-90 <= p_lat <= 90 and -180 <= p_lon <= 180): continue
-            if not cleaned_pts or i == len(pts) - 1 or math.hypot(p_lat - cleaned_pts[-1][0], p_lon - cleaned_pts[-1][1]) > 0.001:
+            if not cleaned_pts or i == len(pts) - 1 or math.hypot(p_lat - cleaned_pts[-1][0], p_lon - cleaned_pts[-1][1]) > 0.005:
                 cleaned_pts.append([p_lat, p_lon])
 
         if len(cleaned_pts) < 2: continue
@@ -335,7 +246,7 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     return synchronized_latest_data, processed_tracks
 
 # ==============================================================================
-# 6. カバレッジ生成
+# 5. カバレッジ生成
 # ==============================================================================
 def generate_dynamic_coverage(session):
     print("Generating dynamic AIS coverage...")
@@ -351,7 +262,7 @@ def generate_dynamic_coverage(session):
     except Exception as e: print(f"Error in dynamic coverage: {e}")
 
 # ==============================================================================
-# 7. メイン実行フロー
+# 6. メイン実行フロー
 # ==============================================================================
 def main():
     os.makedirs("data", exist_ok=True)
