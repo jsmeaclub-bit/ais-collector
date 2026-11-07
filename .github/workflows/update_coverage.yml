@@ -36,7 +36,7 @@ jobs:
       - name: Run Global AIS Coverage Collector
         env:
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
-          COVERAGE_LISTEN_SECONDS: ${{ github.event.inputs.duration_minutes * 60 }}
+          COVERAGE_MINUTES: ${{ github.event.inputs.duration_minutes || '5' }}
         run: |
           python update_coverage.py
 
