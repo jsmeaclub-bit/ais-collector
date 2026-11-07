@@ -299,7 +299,7 @@ def main():
         }
         existing_latest[mmsi] = merged_ship
 
-    # 5. latest_2026.json の書き出し
+# 5. latest_2026.json の書き出し
     latest_output = {
         "masterCounts": master_counts,
         "latest": list(existing_latest.values())
@@ -315,4 +315,9 @@ def main():
         for s in existing_latest.values()
         if s.get("lat") is not None and s.get("lng") is not None
     ]
+    update_coverage_geojson(all_active_points)
+
+
+if __name__ == "__main__":
+    main()
     update_coverage_geojson(all_active_points)
