@@ -275,8 +275,7 @@ def main():
         except Exception:
             existing_latest = {}
 
-    # 4. 最新位置情報とマスター属性のマージ
-    live_points = []
+# 4. 最新位置情報とマスター属性のマージ
     for mmsi, ship in live_ships.items():
         m_info = master_map.get(mmsi, {})
         merged_ship = {
@@ -300,9 +299,6 @@ def main():
         }
         existing_latest[mmsi] = merged_ship
 
-        if ship["lat"] is not None and ship["lng"] is not None:
-            live_points.append((ship["lat"], ship["lng"]))
-
     # 5. latest_2026.json の書き出し
     latest_output = {
         "masterCounts": master_counts,
@@ -313,9 +309,10 @@ def main():
 
     print(f"[INFO] latest_2026.json saved. Total monitored in latest: {len(existing_latest)} vessels.")
 
-    # 6. AIS実績圏（coverage_2026.json）の即時更新
-    update_coverage_geojson(live_points)
-
-
-if __name__ == "__main__":
-    main()
+    # 6. 【修正点】蓄積された全1,221隻の有効座標から50海里圏を一括生成
+    all_active_points = [
+        (s["lat"], s["lng"])
+        for s in existing_latest.values()
+        if s.get("lat") is not None and s.get("lng") is not None
+    ]
+    update_coverage_geojson(all_active_points)
