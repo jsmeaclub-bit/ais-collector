@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import math
-import heapq
 import asyncio
 import datetime
 import websockets
@@ -11,18 +10,16 @@ import requests
 try:
     import searoute as sr
     import numpy as np
-    import cv2
     from scipy.interpolate import splprep, splev
-    from shapely.geometry import Point, LineString, Polygon, mapping
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 except ImportError:
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely", "scipy", "numpy", "opencv-python-headless"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely", "scipy", "numpy"])
     import searoute as sr
     import numpy as np
-    import cv2
     from scipy.interpolate import splprep, splev
-    from shapely.geometry import Point, LineString, Polygon, mapping
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 
 GAS_URL = os.environ.get("GAS_WEBHOOK_URL")
@@ -33,146 +30,47 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 1. 東京湾 超高解像度ポリゴン
+# 1. 美しい船舶旋回カーブの生成（Bスプライン曲線）
 # ==============================================================================
-TOKYO_BAY_POLYGONS = [
-    [(139.50, 35.20), (139.65, 35.20), (139.65, 35.40), (139.50, 35.40)],
-    [(139.50, 35.40), (139.67, 35.40), (139.67, 35.46), (139.50, 35.46)],
-    [(139.50, 35.46), (139.72, 35.46), (139.72, 35.52), (139.50, 35.52)],
-    [(139.50, 35.52), (139.75, 35.52), (139.75, 35.70), (139.50, 35.70)],
-    [(139.68, 35.44), (139.70, 35.44), (139.70, 35.46), (139.68, 35.46)],
-    [(139.70, 35.47), (139.74, 35.47), (139.74, 35.495), (139.70, 35.495)],
-    [(139.74, 35.495), (139.78, 35.495), (139.78, 35.51), (139.74, 35.51)],
-    [(139.77, 35.515), (139.81, 35.515), (139.81, 35.535), (139.77, 35.535)],
-    [(139.74, 35.535), (139.84, 35.535), (139.84, 35.58), (139.74, 35.58)],
-    [(139.95, 35.50), (140.20, 35.50), (140.20, 35.70), (139.95, 35.70)],
-    [(139.90, 35.30), (140.20, 35.30), (140.20, 35.50), (139.90, 35.50)],
-    [(139.80, 35.10), (140.20, 35.10), (140.20, 35.30), (139.80, 35.30)]
-]
-LAND_OBSTACLES = unary_union([Polygon(poly) for poly in TOKYO_BAY_POLYGONS])
-
-# ==============================================================================
-# 2. 超高解像度 画像処理ベース迂回エンジン
-# ==============================================================================
-class HighResRasterRouter:
-    def __init__(self):
-        self.min_lat, self.max_lat = 35.20, 35.70
-        self.min_lon, self.max_lon = 139.50, 140.20
-        self.w, self.h = 2000, 2000 
-        self.mask = np.ones((self.h, self.w), dtype=np.uint8) * 255
-        
-        for obs in TOKYO_BAY_POLYGONS:
-            pts = [self.latlon_to_pixel(lat, lon) for lon, lat in obs]
-            cv2.fillPoly(self.mask, [np.array(pts, np.int32)], 0)
-
-        dist = cv2.distanceTransform(self.mask, cv2.DIST_L2, 5)
-        self.cost_map = np.where(self.mask > 128, 1.0 + 150.0 / (dist + 1.0), np.inf)
-
-    def latlon_to_pixel(self, lat, lon):
-        x = int((lon - self.min_lon) / (self.max_lon - self.min_lon) * (self.w - 1))
-        y = int((self.max_lat - lat) / (self.max_lat - self.min_lat) * (self.h - 1))
-        return max(0, min(self.w - 1, x)), max(0, min(self.h - 1, y))
-
-    def pixel_to_latlon(self, x, y):
-        lon = self.min_lon + (x / (self.w - 1)) * (self.max_lon - self.min_lon)
-        lat = self.max_lat - (y / (self.h - 1)) * (self.max_lat - self.min_lat)
-        return round(lat, 5), round(lon, 5)
-
-    def _snap_to_sea(self, x, y, radius=60):
-        if self.mask[y, x] > 128: return x, y
-        best_x, best_y, min_d = x, y, float('inf')
-        for dy in range(-radius, radius+1):
-            for dx in range(-radius, radius+1):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.w and 0 <= ny < self.h and self.mask[ny, nx] > 128:
-                    d = dx*dx + dy*dy
-                    if d < min_d: min_d, best_x, best_y = d, nx, ny
-        return best_x, best_y if min_d != float('inf') else (x, y)
-
-    def find_route(self, lat1, lon1, lat2, lon2):
-        if not (self.min_lat <= lat1 <= self.max_lat and self.min_lon <= lon1 <= self.max_lon): return None
-        if not (self.min_lat <= lat2 <= self.max_lat and self.min_lon <= lon2 <= self.max_lon): return None
-        
-        sx, sy = self._snap_to_sea(*self.latlon_to_pixel(lat1, lon1))
-        gx, gy = self._snap_to_sea(*self.latlon_to_pixel(lat2, lon2))
-        queue = [(0, sx, sy, [])]
-        visited = {}
-        
-        while queue:
-            cost, x, y, path = heapq.heappop(queue)
-            if (x, y) in visited and visited[(x, y)] <= cost: continue
-            visited[(x, y)] = cost
-            new_path = path + [(x, y)]
-            
-            if abs(x - gx) <= 4 and abs(y - gy) <= 4:
-                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::10]]
-                return [[lat1, lon1]] + route + [[lat2, lon2]]
-                
-            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.w and 0 <= ny < self.h:
-                    step_cost = self.cost_map[ny, nx]
-                    if not np.isinf(step_cost):
-                        heuristic = math.hypot(gx - nx, gy - ny) * 2.5
-                        heapq.heappush(queue, (cost + step_cost + heuristic, nx, ny, new_path))
-        return None
-
-tokyo_router = HighResRasterRouter()
-
-# ==============================================================================
-# 3. 軌跡描画判定プロセス（陸地回避自己修正ロジック）
-# ==============================================================================
-def b_spline_core(unique_pts, s_val, num_points):
-    pts_arr = np.array(unique_pts)
-    x, y = pts_arr[:, 0], pts_arr[:, 1]
-    k = min(3, len(unique_pts) - 1)
-    tck, u = splprep([x, y], s=s_val, k=k)
-    u_new = np.linspace(0, 1, num_points)
-    x_new, y_new = splev(u_new, tck)
-    x_new[0], y_new[0] = x[0], y[0]
-    x_new[-1], y_new[-1] = x[-1], y[-1]
-    return [[round(x_new[i], 5), round(y_new[i], 5)] for i in range(num_points)]
-
-def chaikin_smooth(points, iterations=1):
-    if not points or len(points) < 3: return points
-    current = points
-    for _ in range(iterations):
-        next_pts = [current[0]]
-        for i in range(len(current) - 1):
-            p0, p1 = current[i], current[i + 1]
-            next_pts.append([round(0.75*p0[0] + 0.25*p1[0], 5), round(0.75*p0[1] + 0.25*p1[1], 5)])
-            next_pts.append([round(0.25*p0[0] + 0.75*p1[0], 5), round(0.25*p0[1] + 0.75*p1[1], 5)])
-        next_pts.append(current[-1])
-        current = next_pts
-    return current
-
-def draw_and_check_route(points, num_points=70):
-    if len(points) < 3: return resample_path_linear(points, num_points)
+def b_spline_smooth(points, num_points=70):
+    """
+    複雑な画像処理による陸地回避を廃止し、
+    自然な船の旋回（大きな弧を描く動き）のみを数式で適用する。
+    """
+    if not points or len(points) < 3:
+        return resample_path_linear(points, num_points)
+    
+    # 座標の重複や極端な近接点を除去（スプライン計算エラー防止）
     unique_pts = [points[0]]
     for p in points[1:]:
         if math.hypot(p[0] - unique_pts[-1][0], p[1] - unique_pts[-1][1]) > 1e-4:
             unique_pts.append(p)
-    if len(unique_pts) < 3: return resample_path_linear(unique_pts, num_points)
-
-    start, end = unique_pts[0], unique_pts[-1]
-
-    if 35.2 < start[0] < 35.7 and 139.5 < start[1] < 140.2:
-        safe_pixel_route = tokyo_router.find_route(start[0], start[1], end[0], end[1])
-        if safe_pixel_route and len(safe_pixel_route) >= 3:
-            canal_route = chaikin_smooth(safe_pixel_route, iterations=1)
-            return resample_path_linear(canal_route, num_points=num_points)
-
-    try:
-        curve = b_spline_core(unique_pts, s_val=0.002, num_points=num_points)
-        curve_line = LineString(curve)
-        if not curve_line.intersects(LAND_OBSTACLES):
-            return curve
-    except Exception:
-        pass
+            
+    if len(unique_pts) < 3:
+        return resample_path_linear(unique_pts, num_points)
         
-    return resample_path_linear(unique_pts, num_points)
+    pts_arr = np.array(unique_pts)
+    x = pts_arr[:, 0]
+    y = pts_arr[:, 1]
+    
+    try:
+        # k=3(3次曲線)で船の自然な動きを再現
+        k = min(3, len(unique_pts) - 1)
+        tck, u = splprep([x, y], s=0.002, k=k)
+        u_new = np.linspace(0, 1, num_points)
+        x_new, y_new = splev(u_new, tck)
+        
+        # 始点と終点は必ず実座標に完全一致させる
+        x_new[0], y_new[0] = x[0], y[0]
+        x_new[-1], y_new[-1] = x[-1], y[-1]
+        
+        return [[round(x_new[i], 5), round(y_new[i], 5)] for i in range(num_points)]
+    except Exception as e:
+        print("Spline fallback:", e)
+        return resample_path_linear(unique_pts, num_points)
 
 def resample_path_linear(points, num_points=70):
+    """直線的なフォールバック用等間隔リサンプリング"""
     if not points or len(points) < 2: return points
     dists = [0.0]
     for i in range(1, len(points)):
@@ -191,9 +89,10 @@ def resample_path_linear(points, num_points=70):
     return resampled
 
 # ==============================================================================
-# 4. ベース航路計算
+# 2. ベース航路計算
 # ==============================================================================
 def calculate_sea_route(lat1, lon1, lat2, lon2):
+    """外洋ルーティングエンジンのみを使用"""
     if math.hypot(lat1 - lat2, lon1 - lon2) < 0.05:
         return [[round(lat1, 5), round(lon1, 5)], [round(lat2, 5), round(lon2, 5)]]
     try:
@@ -224,7 +123,7 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(math.atan2(y, x)) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 5. 実行フロー (新データ項目対応)
+# 3. 実行フロー (新データ項目対応)
 # ==============================================================================
 def fetch_base_data_from_gas(session):
     target_mmsis, existing_tracks, base_latest = set(), {}, {}
@@ -270,7 +169,6 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
             if s["destination"] != "-": latest_map[m]["destination"] = s["destination"]
             if s["eta"] != "-": latest_map[m]["eta"] = s["eta"]
         else: 
-            # 新規受信時に全項目を初期化保持
             latest_map[m] = {
                 "mmsi": m, "name": s["name"] or m, "category": "日本支配船", 
                 "lat": s["lat"], "lng": s["lng"], "speed": s["speed"], 
@@ -292,7 +190,8 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
         for i in range(len(cleaned_pts) - 1):
             full_track.extend(calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1])[1:] if full_track else calculate_sea_route(cleaned_pts[i][0], cleaned_pts[i][1], cleaned_pts[i+1][0], cleaned_pts[i+1][1]))
 
-        final_track = draw_and_check_route(unwrap_coordinates(full_track), num_points=70)
+        # ★ スプライン曲線のみを適用し、画像処理での回避は行わない
+        final_track = b_spline_smooth(unwrap_coordinates(full_track), num_points=70)
         final_track[-1] = [lat, lng]
 
         fade_segments = [{"coords": final_track[i:min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track))], "weight": round(1.0 + (2.8 * ((min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track)) / len(final_track)) ** 1.2)), 2), "opacity": round(0.06 + (0.89 * ((min(i + max(1, (len(final_track) - 1) // 14) + 1, len(final_track)) / len(final_track)) ** 1.5)), 3)} for i in range(0, len(final_track) - 1, max(1, (len(final_track) - 1) // 14))]
