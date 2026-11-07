@@ -7,6 +7,7 @@ import asyncio
 import subprocess
 import sys
 import websockets
+from collections import defaultdict
 from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
@@ -82,7 +83,6 @@ def get_master_data(client):
 async def collect_ais_data(target_mmsis):
     received = {}
     if not AISSTREAM_API_KEY: return received
-    # 手動実行時は30秒
     duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
     url = "wss://stream.aisstream.io/v0/stream"
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": [[[-90, -180], [90, 180]]], "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
@@ -197,6 +197,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     routes_output = []
     calculated_headings = {}
+    grid_counts = defaultdict(int)
+    GRID_SIZE = 0.08  # 約8km〜9kmメッシュで重複航路を集計
 
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
@@ -207,7 +209,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
-        # 最新位置の取得
         latest_coord = None
         if mmsi in existing_latest:
             curr_lat = existing_latest[mmsi].get("lat")
@@ -220,7 +221,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # ★★★ 軌跡の構築：最新位置を絶対に脱落させないロジック ★★★
         sub_lines = []
         curr_sub = [cleaned_list[0][1]]
         for i in range(1, len(cleaned_list)):
@@ -232,10 +232,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if dlat > 0.25 or dlng > 0.25:
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
-                    for mid_p in interpolated[1:]:
-                        curr_sub.append(mid_p)
+                    for mid_p in interpolated[1:]: curr_sub.append(mid_p)
                 else:
-                    # searouteが取得できない大洋上でも、最新位置へ向かう航跡は途切れさせず接続
                     curr_sub.append(curr_p)
             else:
                 curr_sub.append(curr_p)
@@ -245,11 +243,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         elif len(curr_sub) == 1 and sub_lines:
             sub_lines[-1].append(curr_sub[0])
 
-        # ★ 最終セグメントの先端を最新座標（船の位置）に強制吸着
         if latest_coord and sub_lines and sub_lines[-1]:
             sub_lines[-1][-1] = latest_coord
 
-        # 進行方位角の算出
         heading = 0.0
         if len(sub_lines) > 0 and len(sub_lines[-1]) >= 2:
             p_prev = sub_lines[-1][-2]
@@ -257,7 +253,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             heading = calculate_bearing(p_prev, p_last)
             calculated_headings[mmsi] = heading
 
-        # 最初は薄く（0.18）、最新位置が最もはっきり（0.95）
         segments = []
         total_pts = sum(len(sub) for sub in sub_lines)
         if total_pts >= 2:
@@ -272,9 +267,17 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     
                 smoothed = smooth_line(sub_sampled, iterations=2)
                 for i in range(len(smoothed) - 1):
+                    p1, p2 = smoothed[i], smoothed[i+1]
                     ratio = current_idx / (total_pts - 1)
                     opacity = round(0.18 + (0.77 * ratio), 2)
-                    segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity})
+                    
+                    # グリッド通過カウント
+                    mid_lat = (p1[0] + p2[0]) / 2.0
+                    mid_lng = (p1[1] + p2[1]) / 2.0
+                    g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
+                    grid_counts[g_key] += 1
+
+                    segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
                     current_idx += 1
 
         if segments:
@@ -284,6 +287,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "heading": heading, 
                 "segments": segments
             })
+
+    # ★ 各セグメントに重なり回数（count）を割り当て
+    for r in routes_output:
+        for seg in r["segments"]:
+            g_key = seg.pop("g_key", None)
+            seg["count"] = grid_counts.get(g_key, 1)
 
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, 0.0)
