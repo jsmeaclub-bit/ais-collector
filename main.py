@@ -198,7 +198,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     routes_output = []
     calculated_headings = {}
     grid_counts = defaultdict(int)
-    GRID_SIZE = 0.08  # 約8km〜9kmメッシュで重複航路を集計
+    GRID_SIZE = 0.08
 
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
@@ -253,32 +253,37 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             heading = calculate_bearing(p_prev, p_last)
             calculated_headings[mmsi] = heading
 
+        # ★★★ 平滑化後の実際のセグメント数を元に【最初=0.15、最新船尾=0.95】を厳密計算 ★★★
+        smoothed_sub_lines = []
+        for sub in sub_lines:
+            if len(sub) > 200:
+                step = len(sub) / 200.0
+                sub_sampled = [sub[int(j * step)] for j in range(200)]
+                if sub_sampled[-1] != sub[-1]: sub_sampled.append(sub[-1])
+            else:
+                sub_sampled = sub
+            smoothed = smooth_line(sub_sampled, iterations=2)
+            smoothed_sub_lines.append(smoothed)
+
+        total_segments = sum(len(s) - 1 for s in smoothed_sub_lines if len(s) >= 2)
         segments = []
-        total_pts = sum(len(sub) for sub in sub_lines)
-        if total_pts >= 2:
-            current_idx = 0
-            for sub in sub_lines:
-                if len(sub) > 200:
-                    step = len(sub) / 200.0
-                    sub_sampled = [sub[int(j * step)] for j in range(200)]
-                    if sub_sampled[-1] != sub[-1]: sub_sampled.append(sub[-1])
-                else:
-                    sub_sampled = sub
-                    
-                smoothed = smooth_line(sub_sampled, iterations=2)
+
+        if total_segments > 0:
+            current_seg_idx = 0
+            for smoothed in smoothed_sub_lines:
                 for i in range(len(smoothed) - 1):
                     p1, p2 = smoothed[i], smoothed[i+1]
-                    ratio = current_idx / (total_pts - 1)
-                    opacity = round(0.18 + (0.77 * ratio), 2)
+                    # 最初（最古）が 0.0 -> 0.15（薄い）、最後（最新位置）が 1.0 -> 0.95（最も濃くはっきり）
+                    ratio = current_seg_idx / max(1, total_segments - 1)
+                    opacity = round(0.15 + (0.80 * ratio), 2)
                     
-                    # グリッド通過カウント
                     mid_lat = (p1[0] + p2[0]) / 2.0
                     mid_lng = (p1[1] + p2[1]) / 2.0
                     g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
                     grid_counts[g_key] += 1
 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
-                    current_idx += 1
+                    current_seg_idx += 1
 
         if segments:
             routes_output.append({
@@ -288,7 +293,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
-    # ★ 各セグメントに重なり回数（count）を割り当て
     for r in routes_output:
         for seg in r["segments"]:
             g_key = seg.pop("g_key", None)
