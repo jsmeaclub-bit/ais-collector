@@ -1,138 +1,171 @@
 import os
-import sys
 import json
 import time
 import asyncio
-import subprocess
 import websockets
 from shapely.geometry import Point, mapping
 from shapely.ops import unary_union
 
-# 必要な外部ライブラリの自動チェック
-for pkg in ["shapely", "websockets"]:
-    try:
-        __import__(pkg)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
+
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-
+POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage_2026.json")
-POINTS_CACHE_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 
-# 1回の手動実行で全世界からデータを受信する時間（5分＝300秒）
-LISTEN_DURATION = 300
-BUFFER_DEGREE = 0.83  # 沿岸約50海里（半径）
-GRID_RESOLUTION = 0.1 # 約10kmメッシュで重複排除
+# 収集時間（手動・自動実行ともに5分間）
+LISTEN_DURATION = 300  
 
+def get_under_covered_bboxes(points, grid_size=30, max_boxes=12):
+    """
+    過去の受信ポイント（coverage_points.json）をグリッド分析し、
+    データが最も少ない「地図の過疎エリア」を特定して重点BoundingBoxを生成する。
+    """
+    grid_counts = {}
+    lat_steps = int(180 / grid_size)
+    lng_steps = int(360 / grid_size)
+    
+    # 地球全体をグリッド分割（初期値0）
+    for i in range(lat_steps):
+        for j in range(lng_steps):
+            grid_counts[(i, j)] = 0
+            
+    # 既存ポイントの分布密度をカウント
+    for pt in points:
+        lat, lng = pt[0], pt[1]
+        lat = max(-90, min(89.9999, lat))
+        lng = max(-180, min(179.9999, lng))
+        
+        i = int((lat + 90) / grid_size)
+        j = int((lng + 180) / grid_size)
+        grid_counts[(i, j)] += 1
+        
+    # ポイントが少ない（過疎化している）順にソート
+    sorted_grids = sorted(grid_counts.items(), key=lambda x: x[1])
+    
+    bboxes = []
+    # データが少ない上位エリアを抽出
+    for (i, j), count in sorted_grids[:max_boxes]:
+        min_lat = -90 + i * grid_size
+        max_lat = min_lat + grid_size
+        min_lng = -180 + j * grid_size
+        max_lng = min_lng + grid_size
+        bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
+        
+    # 船が少なく電波が拾いにくい大洋を固定で追加保護（南太平洋、インド洋など）
+    bboxes.append([[-60, 40], [-20, 100]])   # インド洋南部
+    bboxes.append([[-60, -160], [-20, -80]]) # 南太平洋
+    bboxes.append([[-40, -40], [10, 20]])    # 大西洋南部・アフリカ西岸
+    
+    return bboxes
 
-async def collect_global_ais_points(duration_sec):
+async def collect_coverage_data(bboxes):
+    collected_points = []
     if not AISSTREAM_API_KEY:
-        print("[ERROR] AISSTREAM_API_KEY が設定されていません。")
-        return []
-
-    print(f"[INFO] 全世界の全船舶AIS信号を受信開始（受信時間: {duration_sec} 秒）...")
+        print("[ERROR] AISSTREAM_API_KEY is not set.")
+        return collected_points
+        
     url = "wss://stream.aisstream.io/v0/stream"
-    subscribe_msg = {
-        "APIKey": AISSTREAM_API_KEY,
-        "BoundingBoxes": [[[-90, -180], [90, 180]]],
+    sub_msg = {
+        "APIKey": AISSTREAM_API_KEY, 
+        "BoundingBoxes": bboxes, 
         "FilterMessageTypes": ["PositionReport"]
     }
 
-    new_points = set()
-    start_time = time.time()
-    msg_count = 0
-
     try:
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=10**7) as ws:
-            await ws.send(json.dumps(subscribe_msg))
-            while time.time() - start_time < duration_sec:
+        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+            await ws.send(json.dumps(sub_msg))
+            print(f"Connected. Focusing on under-covered areas. Listening for {LISTEN_DURATION} seconds...")
+            start = time.time()
+            while time.time() - start < LISTEN_DURATION:
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     data = json.loads(msg)
-                    msg_count += 1
-
-                    meta = data.get("MetaData", {})
-                    lat = meta.get("latitude")
-                    lng = meta.get("longitude")
-
-                    if lat is not None and lng is not None:
-                        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
-                            grid_pt = (round(lat / GRID_RESOLUTION) * GRID_RESOLUTION,
-                                       round(lng / GRID_RESOLUTION) * GRID_RESOLUTION)
-                            new_points.add((round(grid_pt[0], 2), round(grid_pt[1], 2)))
-
-                    if msg_count % 2000 == 0:
-                        elapsed = int(time.time() - start_time)
-                        print(f"       受信中: {msg_count} 件 | 抽出地点: {len(new_points)} ({elapsed}/{duration_sec}秒)")
-
+                    
+                    if data.get("MessageType") == "PositionReport":
+                        pos = data.get("Message", {}).get("PositionReport", {})
+                        lat = pos.get("Latitude")
+                        lng = pos.get("Longitude")
+                        
+                        # 有効な座標のみ抽出
+                        if lat is not None and lng is not None and -90 <= lat <= 90 and -180 <= lng <= 180:
+                            # 丸めて保存（小数点2桁 ≒ 約1km四方の解像度。ファイル肥大化を防止）
+                            collected_points.append([round(lat, 2), round(lng, 2)])
                 except asyncio.TimeoutError:
                     continue
-                except Exception:
+                except Exception as e:
                     continue
+    except Exception as e: 
+        print(f"[ERROR] WebSocket connection failed: {e}")
+        
+    return collected_points
 
-    except Exception as e:
-        print(f"[ERROR] WebSocket接続エラー: {e}")
-
-    print(f"[INFO] 受信完了: 合計 {msg_count} 件から {len(new_points)} の地点を記録。")
-    return list(new_points)
-
-
-def load_cached_points():
-    if os.path.exists(POINTS_CACHE_FILE):
-        try:
-            with open(POINTS_CACHE_FILE, "r", encoding="utf-8") as f:
-                pts = json.load(f)
-                return set((round(p[0], 2), round(p[1], 2)) for p in pts)
-        except Exception:
-            pass
-    return set()
-
-
-def build_and_save_coverage_geojson(all_points):
-    print(f"[INFO] 合計 {len(all_points)} 地点から50海里ポリゴンを生成中...")
-    if not all_points:
-        return
-
-    circles = [Point(lng, lat).buffer(BUFFER_DEGREE, resolution=8) for lat, lng in all_points]
-    print("       ポリゴン結合（unary_union）を実行中...")
-    merged_geom = unary_union(circles)
-    simplified_geom = merged_geom.simplify(0.03, preserve_topology=True)
-
-    geojson_output = {
+def generate_coverage_polygon(points):
+    """
+    収集したポイント群から半径50海里の円を描き、それらを融合して滑らかなGeoJSONポリゴンを生成する
+    """
+    print(f"Generating polygon from {len(points)} unique points...")
+    # 50海里 ≒ 約90km ≒ 0.83度
+    BUFFER_DEG = 0.83
+    
+    circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in points]
+    merged_polygon = unary_union(circles)
+    
+    geojson_feature = {
         "type": "FeatureCollection",
         "features": [
             {
                 "type": "Feature",
+                "geometry": mapping(merged_polygon),
                 "properties": {
-                    "description": "Ground AIS Reception Coverage (Approx. 50NM)",
-                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-                    "points_count": len(all_points)
-                },
-                "geometry": mapping(simplified_geom)
+                    "name": "Global AIS Coverage",
+                    "buffer_nm": 50
+                }
             }
         ]
     }
-
-    with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(geojson_output, f, ensure_ascii=False)
-    print(f"[SUCCESS] {COVERAGE_FILE} を更新完了。")
-
-    with open(POINTS_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(all_points), f, ensure_ascii=False)
-    print(f"[SUCCESS] {POINTS_CACHE_FILE} を更新完了。")
-
+    return geojson_feature
 
 def main():
-    cached_points = load_cached_points()
-    print(f"[INFO] 過去の累積受信地点数: {len(cached_points)}")
+    # 1. 過去に構築したポイントデータの読み込み
+    existing_points = []
+    if os.path.exists(POINTS_FILE):
+        try:
+            with open(POINTS_FILE, "r", encoding="utf-8") as f:
+                existing_points = json.load(f)
+        except Exception as e:
+            print(f"Error loading {POINTS_FILE}: {e}")
+            
+    print(f"Loaded {len(existing_points)} existing coverage points.")
 
-    new_points = asyncio.run(collect_global_ais_points(LISTEN_DURATION))
-    all_points = cached_points.union(new_points)
-    build_and_save_coverage_geojson(all_points)
+    # 2. 地図の少ないエリアを特定して重点 BoundingBox を作成
+    bboxes = get_under_covered_bboxes(existing_points, grid_size=30, max_boxes=12)
+    print(f"Target Bounding Boxes for under-covered areas generated.")
 
+    # 3. 重点エリアのAISストリームを収集
+    new_points = asyncio.run(collect_coverage_data(bboxes))
+    print(f"Collected {len(new_points)} new points.")
+
+    # 4. 重複を排除してマージ
+    unique_points = set(tuple(pt) for pt in existing_points)
+    for pt in new_points:
+        unique_points.add(tuple(pt))
+        
+    merged_points = [list(pt) for pt in unique_points]
+    print(f"Total unique coverage points: {len(merged_points)}")
+
+    # 5. ポイントデータ（学習記憶）の保存
+    with open(POINTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(merged_points, f, ensure_ascii=False)
+
+    # 6. ポリゴンを描画して緑色マップ (GeoJSON) を更新
+    if merged_points:
+        coverage_geojson = generate_coverage_polygon(merged_points)
+        with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump(coverage_geojson, f, ensure_ascii=False)
+        print("Coverage map successfully updated.")
+    else:
+        print("No points to generate coverage map.")
 
 if __name__ == "__main__":
     main()
