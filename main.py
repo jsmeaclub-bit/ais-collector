@@ -33,44 +33,40 @@ if not GAS_URL or not API_KEY:
     sys.exit(1)
 
 # ==============================================================================
-# 1. 東京湾 高解像度ポリゴン（運河を精密に開通させた障害物定義）
+# 1. 東京湾 超高解像度ポリゴン
 # ==============================================================================
 TOKYO_BAY_POLYGONS = [
-    # 西側本土
     [(139.50, 35.20), (139.65, 35.20), (139.65, 35.40), (139.50, 35.40)],
     [(139.50, 35.40), (139.67, 35.40), (139.67, 35.46), (139.50, 35.46)],
     [(139.50, 35.46), (139.72, 35.46), (139.72, 35.52), (139.50, 35.52)],
     [(139.50, 35.52), (139.75, 35.52), (139.75, 35.70), (139.50, 35.70)],
-    # 人工島群
     [(139.68, 35.44), (139.70, 35.44), (139.70, 35.46), (139.68, 35.46)],
     [(139.70, 35.47), (139.74, 35.47), (139.74, 35.495), (139.70, 35.495)],
     [(139.74, 35.495), (139.78, 35.495), (139.78, 35.51), (139.74, 35.51)],
     [(139.77, 35.515), (139.81, 35.515), (139.81, 35.535), (139.77, 35.535)],
     [(139.74, 35.535), (139.84, 35.535), (139.84, 35.58), (139.74, 35.58)],
-    # 東側本土
     [(139.95, 35.50), (140.20, 35.50), (140.20, 35.70), (139.95, 35.70)],
     [(139.90, 35.30), (140.20, 35.30), (140.20, 35.50), (139.90, 35.50)],
     [(139.80, 35.10), (140.20, 35.10), (140.20, 35.30), (139.80, 35.30)]
 ]
-
 LAND_OBSTACLES = unary_union([Polygon(poly) for poly in TOKYO_BAY_POLYGONS])
 
 # ==============================================================================
-# 2. 高解像度 画像処理ベース迂回エンジン
+# 2. 超高解像度 画像処理ベース迂回エンジン
 # ==============================================================================
 class HighResRasterRouter:
     def __init__(self):
         self.min_lat, self.max_lat = 35.20, 35.70
         self.min_lon, self.max_lon = 139.50, 140.20
-        self.w, self.h = 1000, 1000
+        self.w, self.h = 2000, 2000 
         self.mask = np.ones((self.h, self.w), dtype=np.uint8) * 255
         
         for obs in TOKYO_BAY_POLYGONS:
             pts = [self.latlon_to_pixel(lat, lon) for lon, lat in obs]
             cv2.fillPoly(self.mask, [np.array(pts, np.int32)], 0)
 
-        dist = cv2.distanceTransform(self.mask, cv2.DIST_L2, 3)
-        self.cost_map = np.where(self.mask > 128, 1.0 + 100.0 / (dist + 1.0), np.inf)
+        dist = cv2.distanceTransform(self.mask, cv2.DIST_L2, 5)
+        self.cost_map = np.where(self.mask > 128, 1.0 + 150.0 / (dist + 1.0), np.inf)
 
     def latlon_to_pixel(self, lat, lon):
         x = int((lon - self.min_lon) / (self.max_lon - self.min_lon) * (self.w - 1))
@@ -82,7 +78,7 @@ class HighResRasterRouter:
         lat = self.max_lat - (y / (self.h - 1)) * (self.max_lat - self.min_lat)
         return round(lat, 5), round(lon, 5)
 
-    def _snap_to_sea(self, x, y, radius=30):
+    def _snap_to_sea(self, x, y, radius=60):
         if self.mask[y, x] > 128: return x, y
         best_x, best_y, min_d = x, y, float('inf')
         for dy in range(-radius, radius+1):
@@ -91,7 +87,7 @@ class HighResRasterRouter:
                 if 0 <= nx < self.w and 0 <= ny < self.h and self.mask[ny, nx] > 128:
                     d = dx*dx + dy*dy
                     if d < min_d: min_d, best_x, best_y = d, nx, ny
-        return best_x, best_y
+        return best_x, best_y if min_d != float('inf') else (x, y)
 
     def find_route(self, lat1, lon1, lat2, lon2):
         if not (self.min_lat <= lat1 <= self.max_lat and self.min_lon <= lon1 <= self.max_lon): return None
@@ -107,8 +103,9 @@ class HighResRasterRouter:
             if (x, y) in visited and visited[(x, y)] <= cost: continue
             visited[(x, y)] = cost
             new_path = path + [(x, y)]
-            if abs(x - gx) <= 2 and abs(y - gy) <= 2:
-                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::5]]
+            
+            if abs(x - gx) <= 4 and abs(y - gy) <= 4:
+                route = [self.pixel_to_latlon(px, py) for px, py in new_path[::10]]
                 return [[lat1, lon1]] + route + [[lat2, lon2]]
                 
             for dx, dy in [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (1,1), (-1,1), (1,-1)]:
@@ -123,7 +120,7 @@ class HighResRasterRouter:
 tokyo_router = HighResRasterRouter()
 
 # ==============================================================================
-# 3. 軌跡描画判定プロセス
+# 3. 軌跡描画判定プロセス（陸地回避自己修正ロジック）
 # ==============================================================================
 def b_spline_core(unique_pts, s_val, num_points):
     pts_arr = np.array(unique_pts)
@@ -157,17 +154,19 @@ def draw_and_check_route(points, num_points=70):
             unique_pts.append(p)
     if len(unique_pts) < 3: return resample_path_linear(unique_pts, num_points)
 
+    start, end = unique_pts[0], unique_pts[-1]
+
+    if 35.2 < start[0] < 35.7 and 139.5 < start[1] < 140.2:
+        safe_pixel_route = tokyo_router.find_route(start[0], start[1], end[0], end[1])
+        if safe_pixel_route and len(safe_pixel_route) >= 3:
+            canal_route = chaikin_smooth(safe_pixel_route, iterations=1)
+            return resample_path_linear(canal_route, num_points=num_points)
+
     try:
         curve = b_spline_core(unique_pts, s_val=0.002, num_points=num_points)
         curve_line = LineString(curve)
         if not curve_line.intersects(LAND_OBSTACLES):
             return curve
-
-        start, end = unique_pts[0], unique_pts[-1]
-        safe_pixel_route = tokyo_router.find_route(start[0], start[1], end[0], end[1])
-        if safe_pixel_route and len(safe_pixel_route) >= 3:
-            canal_route = chaikin_smooth(safe_pixel_route, iterations=1)
-            return resample_path_linear(canal_route, num_points=num_points)
     except Exception:
         pass
         
@@ -225,7 +224,7 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     return round((math.degrees(math.atan2(y, x)) + 360.0) % 360.0, 1)
 
 # ==============================================================================
-# 5. 実行フロー
+# 5. 実行フロー (新データ項目対応)
 # ==============================================================================
 def fetch_base_data_from_gas(session):
     target_mmsis, existing_tracks, base_latest = set(), {}, {}
@@ -252,6 +251,13 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
                     if msg.get("MessageType") == "PositionReport":
                         pos = msg.get("Message", {}).get("PositionReport", {})
                         ships_data[mmsi]["lat"], ships_data[mmsi]["lng"], ships_data[mmsi]["speed"] = pos.get("Latitude"), pos.get("Longitude"), pos.get("Sog", 0.0)
+                    elif msg.get("MessageType") == "ShipStaticData":
+                        static = msg.get("Message", {}).get("ShipStaticData", {})
+                        dest = static.get("Destination", "").strip()
+                        if dest: ships_data[mmsi]["destination"] = dest
+                        eta = static.get("Eta", {})
+                        if eta and 1 <= eta.get("Month", 0) <= 12 and 1 <= eta.get("Day", 0) <= 31:
+                            ships_data[mmsi]["eta"] = f"{datetime.datetime.utcnow().year}/{eta['Month']:02d}/{eta['Day']:02d} {eta.get('Hour',0):02d}:{eta.get('Minute',0):02d} UTC"
                 except: continue
     except: pass
     return [s for s in ships_data.values() if s["lat"] is not None and s["lng"] is not None]
@@ -259,8 +265,19 @@ async def collect_ais_data(target_mmsis, duration_sec=180):
 def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     latest_map = {str(s["mmsi"]): s for s in base_latest.get("latest", [])}
     for s in new_ships:
-        if (m := str(s["mmsi"])) in latest_map: latest_map[m].update({"lat": s["lat"], "lng": s["lng"], "speed": s["speed"]})
-        else: latest_map[m] = {"mmsi": m, "name": s["name"] or m, "category": "日本支配船", "lat": s["lat"], "lng": s["lng"], "speed": s["speed"], "destination": s["destination"], "eta": s["eta"], "etaPassed": False, "owner": "-", "type": "-", "survey": "-"}
+        if (m := str(s["mmsi"])) in latest_map: 
+            latest_map[m].update({"lat": s["lat"], "lng": s["lng"], "speed": s["speed"]})
+            if s["destination"] != "-": latest_map[m]["destination"] = s["destination"]
+            if s["eta"] != "-": latest_map[m]["eta"] = s["eta"]
+        else: 
+            # 新規受信時に全項目を初期化保持
+            latest_map[m] = {
+                "mmsi": m, "name": s["name"] or m, "category": "日本支配船", 
+                "lat": s["lat"], "lng": s["lng"], "speed": s["speed"], 
+                "destination": s["destination"], "eta": s["eta"], "etaPassed": False, 
+                "imo": "-", "flag": "-", "owner": "-", "operator": "-", 
+                "type": "-", "gt": "-", "survey": "-"
+            }
 
     processed_tracks = []
     for mmsi, l_ship in latest_map.items():
@@ -285,27 +302,10 @@ def process_and_synchronize_tracks(new_ships, existing_tracks, base_latest):
     return {"masterCounts": base_latest.get("masterCounts", {"total": len(latest_map), "flag": 0, "ctrl": len(latest_map)}), "latest": list(latest_map.values())}, processed_tracks
 
 def generate_dynamic_coverage(session):
-    print("Generating dynamic AIS coverage...")
     try:
-        res = session.get(f"{GAS_URL}?api=coverage_points", timeout=60)
-        if res.status_code == 200:
-            points_data = res.json()
-            if points_data:
-                buffers = [Point(pt[1], pt[0]).buffer(0.85, resolution=8) for pt in points_data]
-                merged = unary_union(buffers)
-                feature = {
-                    "type": "FeatureCollection",
-                    "features": [{
-                        "type": "Feature",
-                        "properties": {"description": "地上AIS受信実績圏"},
-                        "geometry": mapping(merged)
-                    }]
-                }
-                with open("data/coverage_2026.json", "w", encoding="utf-8") as f:
-                    json.dump(feature, f, ensure_ascii=False, separators=(',', ':'))
-                print("coverage_2026.json successfully generated.")
-    except Exception as e:
-        print(f"Error in dynamic coverage: {e}")
+        if (res := session.get(f"{GAS_URL}?api=coverage_points", timeout=60)).status_code == 200 and res.json():
+            with open("data/coverage_2026.json", "w", encoding="utf-8") as f: json.dump({"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"description": "地上AIS受信実績圏"}, "geometry": mapping(unary_union([Point(pt[1], pt[0]).buffer(0.85, resolution=8) for pt in res.json()]))}]}, f, ensure_ascii=False, separators=(',', ':'))
+    except: pass
 
 def main():
     os.makedirs("data", exist_ok=True)
