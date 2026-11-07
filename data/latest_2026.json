@@ -359,13 +359,13 @@
       "owner": "Hakuyo Kisen/Helmstar Shipping",
       "operator": "Hakuyo Kisen KK",
       "survey": "20310324",
-      "lat": 54.627695,
-      "lng": 10.933431666666667,
-      "speed": 7.2,
-      "heading": 300,
+      "lat": 54.65913833333333,
+      "lng": 10.835286666666667,
+      "speed": 10.1,
+      "heading": 299,
       "destination": "MA JFL",
       "eta": "11-15 00:30",
-      "timestamp": "2026-11-07 11:38:23.17441037 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:44.261255966 +0000 UTC"
     },
     {
       "mmsi": "431005558",
@@ -1596,13 +1596,13 @@
       "owner": "TSC1512 Shipping SA",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20311016",
-      "lat": 47.27299166666667,
-      "lng": -122.44083833333335,
-      "speed": 0.2,
-      "heading": 304,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "US TIW",
       "eta": "10-22 04:00",
-      "timestamp": "2026-11-07 09:27:04.73043419 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:06.108654457 +0000 UTC"
     },
     {
       "mmsi": "636021351",
@@ -1777,13 +1777,13 @@
       "owner": "NYK Line",
       "operator": "NYK Line",
       "survey": "20301026",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 48.37187666666667,
+      "lng": -123.35063,
+      "speed": 6.6,
+      "heading": 129,
       "destination": "CONSTANCE_BANK",
       "eta": "11-07 11:00",
-      "timestamp": "2026-11-07 11:48:51.996747944 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:39.805068949 +0000 UTC"
     },
     {
       "mmsi": "352003178",
@@ -1814,13 +1814,13 @@
       "owner": "Maple LNG Transport Inc",
       "operator": "Hiroshima Gas Co Ltd",
       "survey": "20271108",
-      "lat": 46.52081833333333,
-      "lng": 142.89190166666668,
-      "speed": 2.5,
-      "heading": 300,
+      "lat": 46.522335,
+      "lng": 142.87706833333334,
+      "speed": 2.2,
+      "heading": 280,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:49:10.423301977 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:31.010351126 +0000 UTC"
     },
     {
       "mmsi": "431013111",
@@ -2015,13 +2015,13 @@
       "owner": "Misuga SA",
       "operator": "Misuga Kaiun Co Ltd",
       "survey": "20270413",
-      "lat": -32.941986666666665,
-      "lng": 152.03364000000002,
-      "speed": 9.8,
-      "heading": 74,
+      "lat": -32.90886833333333,
+      "lng": 152.11468166666666,
+      "speed": 9.4,
+      "heading": 62,
       "destination": "JP HIC",
       "eta": "11-25 10:00",
-      "timestamp": "2026-11-07 11:37:38.958653507 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:28.641186751 +0000 UTC"
     },
     {
       "mmsi": "431003556",
@@ -2504,13 +2504,13 @@
       "owner": "Paulownia Shipping Panama SA",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20300209",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 49.30375,
+      "lng": -123.05473833333333,
+      "speed": 0,
+      "heading": 295,
       "destination": "CA VAN",
       "eta": "10-23 15:40",
-      "timestamp": "2026-11-07 11:49:07.712973026 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:30.325673887 +0000 UTC"
     },
     {
       "mmsi": "563157900",
@@ -2579,13 +2579,13 @@
       "owner": "Primavera Montana SA",
       "operator": "Shunzan Kaiun KK",
       "survey": "20310915",
-      "lat": 27.81777333333333,
-      "lng": -97.46582,
-      "speed": 0,
-      "heading": 102,
+      "lat": 27.821551666666668,
+      "lng": -97.43144666666667,
+      "speed": 4.3,
+      "heading": 132,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 09:28:55.949115391 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:24.57845804 +0000 UTC"
     },
     {
       "mmsi": "372305000",
@@ -2712,7 +2712,7 @@
       "heading": 0.0,
       "destination": "CARTB",
       "eta": "11-04 12:00",
-      "timestamp": "2026-11-07 11:26:30.4907072 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:50.038535747 +0000 UTC"
     },
     {
       "mmsi": "352006548",
@@ -3249,13 +3249,13 @@
       "owner": "Kisaragi Kisen/Seto Shipping",
       "operator": "Kisaragi Kisen Co Ltd",
       "survey": "20290611",
-      "lat": -29.792378333333332,
-      "lng": 31.115916666666667,
-      "speed": 1.5,
-      "heading": 214,
+      "lat": -29.82457,
+      "lng": 31.08614833333333,
+      "speed": 8.2,
+      "heading": 204,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:26:56.975006533 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:18.608385553 +0000 UTC"
     },
     {
       "mmsi": "538011812",
@@ -3394,13 +3394,13 @@
       "owner": "Ocean Transit Carrier SA",
       "operator": "Yamamaru Kisen KK",
       "survey": "20300226",
-      "lat": 49.28911166666667,
-      "lng": -123.07858333333334,
-      "speed": 0,
-      "heading": 180,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "VAN CA",
       "eta": "10-15 13:00",
-      "timestamp": "2026-11-07 11:38:08.949405785 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:14.424312358 +0000 UTC"
     },
     {
       "mmsi": "431003232",
@@ -4389,13 +4389,13 @@
       "owner": "D Highway Shipping SA",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20290807",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 53.575595,
+      "lng": 8.552881666666668,
+      "speed": 0,
+      "heading": 242,
       "destination": "DE BRV",
       "eta": "11-07 01:15",
-      "timestamp": "2026-11-07 11:48:07.367054127 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:40.062819066 +0000 UTC"
     },
     {
       "mmsi": "431009805",
@@ -6443,13 +6443,13 @@
       "owner": "NS United Naiko Kaiun Kaisha",
       "operator": "Shinei Kisen KK",
       "survey": "20280330",
-      "lat": 35.597255000000004,
-      "lng": 139.91830166666665,
+      "lat": 35.597316666666664,
+      "lng": 139.91840333333332,
       "speed": 0.1,
-      "heading": 335,
+      "heading": 325,
       "destination": "JP URAYASU OFF",
       "eta": "11-05 03:00",
-      "timestamp": "2026-11-07 11:48:22.094821425 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:19.444609467 +0000 UTC"
     },
     {
       "mmsi": "370423000",
@@ -7081,13 +7081,13 @@
       "owner": "Asahi Marine Panama SA",
       "operator": "Osaka Asahi Kaiun Co Ltd",
       "survey": "20290826",
-      "lat": 43.44838666666667,
-      "lng": -3.8178366666666665,
+      "lat": 43.44837,
+      "lng": -3.817805,
       "speed": 0,
       "heading": 95,
       "destination": "ES SDR",
       "eta": "11-01 18:00",
-      "timestamp": "2026-11-07 09:27:11.915946314 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:16.577936209 +0000 UTC"
     },
     {
       "mmsi": "355966000",
@@ -7590,13 +7590,13 @@
       "owner": "Hamasaki Kaiun KK",
       "operator": "Hamasaki Kaiun KK",
       "survey": "20310714",
-      "lat": 35.561495,
-      "lng": 139.949115,
-      "speed": 0,
-      "heading": 342,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:49:02.807024561 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:19.19809113 +0000 UTC"
     },
     {
       "mmsi": "352001294",
@@ -7672,21 +7672,22 @@
     },
     {
       "mmsi": "352005871",
-      "lat": 39.934936666666665,
-      "lng": -75.13232833333333,
-      "speed": 0,
-      "destination": "USCDE",
-      "eta": "2026/10/30 06:00 UTC",
-      "etaPassed": true,
-      "name": "352005871",
-      "category": "日本支配船",
+      "name": "CORAL HALO",
       "imo": "1057086",
+      "category": "日本支配船",
       "flag": "Panama",
-      "owner": "-",
-      "operator": "Nissen Kaiun Co Ltd",
       "type": "Bulk Carrier",
       "gt": "36278",
-      "survey": "-"
+      "owner": "Nikko Kisen/Sun Lanes",
+      "operator": "Nissen Kaiun Co Ltd",
+      "survey": "20300811",
+      "lat": 39.934931666666664,
+      "lng": -75.13234833333333,
+      "speed": 0,
+      "heading": 7,
+      "destination": "USCDE",
+      "eta": "2026/10/30 06:00 UTC",
+      "timestamp": "2026-11-07 12:04:53.338460959 +0000 UTC"
     },
     {
       "mmsi": "563131100",
@@ -9495,13 +9496,13 @@
       "owner": "Seven Seas Highway Shpg SA",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20261125",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 46.19003,
+      "lng": -123.89059333333333,
+      "speed": 13.6,
+      "heading": 265,
       "destination": "CN ZOS",
       "eta": "11-21 17:00",
-      "timestamp": "2026-11-07 11:48:50.73710211 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:24.11959857 +0000 UTC"
     },
     {
       "mmsi": "431800000",
@@ -10129,13 +10130,13 @@
       "owner": "Nissen Kaiun/Southern Route",
       "operator": "Nissen Kaiun Co Ltd",
       "survey": "20280219",
-      "lat": -24.093325,
-      "lng": -46.17847,
+      "lat": -24.09321333333333,
+      "lng": -46.17843166666667,
       "speed": 0,
-      "heading": 292,
+      "heading": 288,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 10:32:20.153433218 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:22.226328545 +0000 UTC"
     },
     {
       "mmsi": "636017741",
@@ -11343,13 +11344,13 @@
       "owner": "Seavance Shipping SA",
       "operator": "Taiyo Kaiun Kaisha Ltd",
       "survey": "20271106",
-      "lat": -23.790061666666666,
-      "lng": 151.18006,
-      "speed": 0,
-      "heading": 125,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "AU GLT",
       "eta": "11-02 10:00",
-      "timestamp": "2026-11-07 11:49:13.511503057 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:06.133829637 +0000 UTC"
     },
     {
       "mmsi": "249162000",
@@ -11743,13 +11744,13 @@
       "owner": "Delica Shipping SA",
       "operator": "Inui Global Logistics Co Ltd",
       "survey": "20310625",
-      "lat": -39.05692666666666,
-      "lng": 174.03649833333333,
+      "lat": -39.056940000000004,
+      "lng": 174.03650000000002,
       "speed": 0,
       "heading": 69,
       "destination": "NZ BLF> NZ NPL",
       "eta": "11-07 01:00",
-      "timestamp": "2026-11-07 09:30:44.992179441 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:45.376298681 +0000 UTC"
     },
     {
       "mmsi": "352002064",
@@ -13517,13 +13518,13 @@
       "owner": "Nissen Kaiun/Southern Route",
       "operator": "Orient Marine Co Ltd",
       "survey": "20270330",
-      "lat": 51.43794333333334,
-      "lng": 3.671788333333333,
-      "speed": 9.5,
-      "heading": 132,
+      "lat": 51.35934833333333,
+      "lng": 3.755386666666667,
+      "speed": 4.7,
+      "heading": 131,
       "destination": "USNDX>NLTNZ",
       "eta": "11-06 22:00",
-      "timestamp": "2026-11-07 11:25:57.363832844 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:26.316887865 +0000 UTC"
     },
     {
       "mmsi": "431014696",
@@ -15362,13 +15363,13 @@
       "owner": "Stevens Line Co Ltd",
       "operator": "Sato Steamship Co Ltd",
       "survey": "20310321",
-      "lat": 49.43379,
-      "lng": -126.861105,
-      "speed": 11.3,
-      "heading": 313,
+      "lat": 49.49530666666667,
+      "lng": -126.95735333333333,
+      "speed": 11.6,
+      "heading": 307,
       "destination": "JP > KRE",
       "eta": "2026/11/29 04:00 UTC",
-      "timestamp": "2026-11-07 11:37:22.27573767 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:00.69389643 +0000 UTC"
     },
     {
       "mmsi": "431000639",
@@ -16824,13 +16825,13 @@
       "owner": "Kaisho Shipping Co Ltd",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20310627",
-      "lat": 48.228195,
-      "lng": -123.60364833333333,
-      "speed": 3.6,
-      "heading": 95,
+      "lat": 48.22674166666666,
+      "lng": -123.54052333333334,
+      "speed": 3.5,
+      "heading": 100,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:25:53.797652892 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:33.752636042 +0000 UTC"
     },
     {
       "mmsi": "431602306",
@@ -18708,12 +18709,12 @@
       "operator": "Taiheiyo Kisen Kaisha Ltd",
       "survey": "20301111",
       "lat": 35.576796666666674,
-      "lng": 139.86756666666668,
+      "lng": 139.867705,
       "speed": 0.1,
-      "heading": 346,
+      "heading": 349,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 09:26:36.225259943 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:36.178072118 +0000 UTC"
     },
     {
       "mmsi": "372161000",
@@ -18978,13 +18979,13 @@
       "owner": "Misuga Kaiun Co Ltd",
       "operator": "Misuga Kaiun Co Ltd",
       "survey": "20280824",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": -33.115335,
+      "lng": 152.01999333333333,
+      "speed": 3,
+      "heading": 88,
       "destination": "AU NTL",
       "eta": "2026/11/07 18:00 UTC",
-      "timestamp": "2026-11-07 11:47:51.859185125 +0000 UTC"
+      "timestamp": "2026-11-07 12:04:47.861886909 +0000 UTC"
     },
     {
       "mmsi": "431007299",
@@ -19358,13 +19359,13 @@
       "owner": "Basic Eternity Line SA",
       "operator": "Daiichi Chuo Kisen Kaisha",
       "survey": "20290627",
-      "lat": -32.959885,
-      "lng": 152.20980999999998,
-      "speed": 1.5,
-      "heading": 259,
+      "lat": -33.04033833333333,
+      "lng": 152.11900666666668,
+      "speed": 8.1,
+      "heading": 195,
       "destination": "AUNTL",
       "eta": "2026/10/29 04:15 UTC",
-      "timestamp": "2026-11-07 09:28:34.47158278 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:03.544314548 +0000 UTC"
     },
     {
       "mmsi": "636024077",
@@ -19510,7 +19511,7 @@
       "heading": 0.0,
       "destination": "US EWR",
       "eta": "11-07 00:00",
-      "timestamp": "2026-11-07 11:47:59.683347238 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:59.76461771 +0000 UTC"
     },
     {
       "mmsi": "352002848",
@@ -19692,7 +19693,7 @@
       "heading": 0.0,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:48:04.679090426 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:04.438198192 +0000 UTC"
     },
     {
       "mmsi": "354663000",
@@ -20014,13 +20015,13 @@
       "owner": "Yumepirika Maritima SA",
       "operator": "NYK Line",
       "survey": "20270516",
-      "lat": 32.5867,
-      "lng": -117.64823833333334,
-      "speed": 2.1,
-      "heading": 317,
+      "lat": 32.644331666666666,
+      "lng": -117.67875000000001,
+      "speed": 5.1,
+      "heading": 339,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:25:54.685763596 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:44.796223669 +0000 UTC"
     },
     {
       "mmsi": "431006299",
@@ -21161,13 +21162,13 @@
       "owner": "DT Chemical SA",
       "operator": "Daiichi Tanker Co Ltd",
       "survey": "20280429",
-      "lat": 52.18425166666667,
-      "lng": 4.211106666666667,
+      "lat": 52.185053333333336,
+      "lng": 4.213295,
       "speed": 0,
-      "heading": 74,
+      "heading": 212,
       "destination": "NL SCE",
       "eta": "10-26 13:45",
-      "timestamp": "2026-11-07 09:27:28.888388748 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:41.765236085 +0000 UTC"
     },
     {
       "mmsi": "636011280",
@@ -21255,13 +21256,13 @@
       "owner": "Toyo Kaiun KK-Shimizu",
       "operator": "JFE Logistics Corp",
       "survey": "20300817",
-      "lat": 35.59910333333333,
-      "lng": 139.93129833333333,
+      "lat": 35.59900666666667,
+      "lng": 139.93122,
       "speed": 0,
-      "heading": 321,
+      "heading": 332,
       "destination": "JP FNB OFF",
       "eta": "11-07 14:10",
-      "timestamp": "2026-11-07 09:27:35.268304979 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:34.124642239 +0000 UTC"
     },
     {
       "mmsi": "431602146",
@@ -21283,21 +21284,22 @@
     },
     {
       "mmsi": "308808000",
-      "lat": 37.31936333333333,
-      "lng": -124.09356333333334,
-      "speed": 1.5,
-      "destination": "-",
-      "eta": "-",
-      "etaPassed": false,
-      "name": "308808000",
-      "category": "日本支配船",
+      "name": "LAPIS ARROW",
       "imo": "9361809",
+      "category": "日本支配船",
       "flag": "Bahamas",
-      "owner": "-",
-      "operator": "Kawasaki Kisen Kaisha Ltd",
       "type": "Vehicles Carrier",
       "gt": "41000",
-      "survey": "-"
+      "owner": "Lapis Maritime Ltd",
+      "operator": "Kawasaki Kisen Kaisha Ltd",
+      "survey": "20310804",
+      "lat": 37.318828333333336,
+      "lng": -123.94801833333332,
+      "speed": 2.5,
+      "heading": 15,
+      "destination": "-",
+      "eta": "-",
+      "timestamp": "2026-11-07 12:06:13.887047803 +0000 UTC"
     },
     {
       "mmsi": "431301698",
@@ -21310,13 +21312,13 @@
       "owner": "Advanced Transport/Aki Kaiun",
       "operator": "Aki Kaiun KK",
       "survey": "20280921",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 35.42373333333333,
+      "lng": 139.73588333333333,
+      "speed": 20.8,
+      "heading": 222,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:26:03.815560963 +0000 UTC"
+      "timestamp": "2026-11-07 12:04:51.899504023 +0000 UTC"
     },
     {
       "mmsi": "431013096",
@@ -21386,13 +21388,13 @@
       "owner": "Fukuyo Kisen/Valiant Eagle",
       "operator": "Fukuyo Kisen",
       "survey": "20300715",
-      "lat": 22.330558333333332,
-      "lng": 114.12589666666666,
+      "lat": 22.330573333333334,
+      "lng": 114.125885,
       "speed": 0,
       "heading": 343,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 10:33:19.155224068 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:24.906822308 +0000 UTC"
     },
     {
       "mmsi": "563270300",
@@ -21423,13 +21425,13 @@
       "owner": "Uyeno Transtech/Japan Railway",
       "operator": "Uyeno Transtech Ltd",
       "survey": "20261014",
-      "lat": 35.497053333333334,
-      "lng": 139.969265,
-      "speed": 0.1,
-      "heading": 16,
+      "lat": 35.49704833333333,
+      "lng": 139.96935333333334,
+      "speed": 0,
+      "heading": 11,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 09:29:05.79094988 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:05.204701034 +0000 UTC"
     },
     {
       "mmsi": "431017687",
@@ -21498,13 +21500,13 @@
       "owner": "Hamano Kaiun KK",
       "operator": "Hamano Kaiun KK",
       "survey": "20310723",
-      "lat": 35.55943666666667,
-      "lng": 140.026865,
-      "speed": 0.1,
-      "heading": 347,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 09:21:03.159257824 +0000 UTC"
+      "timestamp": "2026-11-07 12:04:57.609973463 +0000 UTC"
     },
     {
       "mmsi": "548704000",
@@ -21700,13 +21702,13 @@
       "owner": "Hector Maritime Ltd-IOM",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20300714",
-      "lat": 31.132081666666668,
+      "lat": 31.132091666666668,
       "lng": -81.53551166666666,
       "speed": 0,
       "heading": 132,
       "destination": "USSSI",
       "eta": "11-07 05:00",
-      "timestamp": "2026-11-07 11:48:13.179175184 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:13.17658878 +0000 UTC"
     },
     {
       "mmsi": "548921000",
@@ -22019,13 +22021,13 @@
       "owner": "Stevens Line Co Ltd",
       "operator": "Sato Steamship Co Ltd",
       "survey": "20300511",
-      "lat": -29.83603833333333,
-      "lng": 31.28669,
+      "lat": -29.794353333333333,
+      "lng": 31.321581666666667,
       "speed": 1.9,
       "heading": 111,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 10:33:09.428475273 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:29.161301052 +0000 UTC"
     },
     {
       "mmsi": "431020295",
@@ -22038,13 +22040,13 @@
       "owner": "A Line Ferry Co Ltd",
       "operator": "A Line Ferry Co Ltd",
       "survey": "20271129",
-      "lat": 35.63043166666667,
-      "lng": 139.825805,
+      "lat": 35.63042166666666,
+      "lng": 139.82579166666667,
       "speed": 0,
       "heading": 353,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:49:11.019581542 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:21.920695802 +0000 UTC"
     },
     {
       "mmsi": "431150000",
@@ -22057,13 +22059,13 @@
       "owner": "Mitsui OSK Lines Ltd",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20300825",
-      "lat": -34.374015,
-      "lng": 18.346011666666666,
-      "speed": 18.2,
-      "heading": 332,
+      "lat": -34.24903833333334,
+      "lng": 18.248675,
+      "speed": 17.9,
+      "heading": 325,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:36:33.343127982 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:46.016180325 +0000 UTC"
     },
     {
       "mmsi": "431019703",
@@ -22266,13 +22268,13 @@
       "owner": "Orient Hakusan Shipping SA",
       "operator": "Orient Hakusan Shipping SA",
       "survey": "20310818",
-      "lat": 46.42790166666667,
-      "lng": -125.33607,
-      "speed": 12.1,
-      "heading": 359,
+      "lat": 46.52362333333333,
+      "lng": -125.335615,
+      "speed": 12,
+      "heading": 355,
       "destination": "CA VAN",
       "eta": "11-07 20:00",
-      "timestamp": "2026-11-07 11:37:28.261468622 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:18.797651956 +0000 UTC"
     },
     {
       "mmsi": "352001655",
@@ -22494,13 +22496,13 @@
       "owner": "Murakami Sekiyu/Tradewind Navi",
       "operator": "Mitsui & Co Ltd",
       "survey": "20291112",
-      "lat": -23.919048333333333,
-      "lng": -46.36038833333334,
-      "speed": 0.4,
-      "heading": 279,
+      "lat": -23.919261666666667,
+      "lng": -46.360503333333334,
+      "speed": 0,
+      "heading": 280,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:47:42.647212827 +0000 UTC"
+      "timestamp": "2026-11-07 12:04:51.930577842 +0000 UTC"
     },
     {
       "mmsi": "355520000",
@@ -22627,13 +22629,13 @@
       "owner": "Miyazaki Kaiun KK",
       "operator": "Miyazaki Kaiun Co Ltd",
       "survey": "20290624",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 0.0,
+      "lat": 33.52697166666667,
+      "lng": 136.06541,
+      "speed": 13.2,
+      "heading": 226,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:26:16.354472561 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:22.765586979 +0000 UTC"
     },
     {
       "mmsi": "311002226",
@@ -22684,13 +22686,13 @@
       "owner": "Caroline 82 SASU",
       "operator": "NYK Line",
       "survey": "20270302",
-      "lat": 29.27258,
-      "lng": -93.21850333333333,
-      "speed": 6.1,
-      "heading": 28,
+      "lat": 29.31882166666667,
+      "lng": -93.22813666666666,
+      "speed": 4.8,
+      "heading": 285,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:36:50.990708705 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:18.183262843 +0000 UTC"
     },
     {
       "mmsi": "352002397",
@@ -22722,13 +22724,13 @@
       "owner": "Kawasaki Kisen Kaisha Ltd",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20280213",
-      "lat": -34.26229166666667,
-      "lng": -58.65946333333333,
-      "speed": 10.5,
-      "heading": 109,
+      "lat": -34.30155333333333,
+      "lng": -58.52057166666667,
+      "speed": 11.6,
+      "heading": 105,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:25:58.312717122 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:26.734104049 +0000 UTC"
     },
     {
       "mmsi": "431004666",
@@ -22798,13 +22800,13 @@
       "owner": "Tokushin Kaiun",
       "operator": "Tokushin Kaiun",
       "survey": "20270622",
-      "lat": 33.599851666666666,
-      "lng": 136.16707833333334,
-      "speed": 12.4,
-      "heading": 56,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:49:23.056517816 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:49.301413566 +0000 UTC"
     },
     {
       "mmsi": "431012174",
@@ -22817,13 +22819,13 @@
       "owner": "Wako Kisen YK-Imabari",
       "operator": "Miyazaki Kaiun Co Ltd",
       "survey": "20281025",
-      "lat": 33.754673333333336,
-      "lng": 136.36150333333333,
-      "speed": 13.8,
-      "heading": 226,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:48:19.749078762 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:37.528848058 +0000 UTC"
     },
     {
       "mmsi": "431000384",
@@ -22893,13 +22895,13 @@
       "owner": "Matsuda Kaiun KK - Tokushima",
       "operator": "Matsuda Kaiun KK - Tokushima",
       "survey": "20281024",
-      "lat": 35.519686666666665,
-      "lng": 139.76516833333332,
-      "speed": 1,
-      "heading": 132,
+      "lat": 35.500445,
+      "lng": 139.81319166666665,
+      "speed": 12.1,
+      "heading": 91,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:47:44.474805237 +0000 UTC"
+      "timestamp": "2026-11-07 12:06:24.166011833 +0000 UTC"
     },
     {
       "mmsi": "636024024",
@@ -23026,13 +23028,13 @@
       "owner": "Sakai Kisen KK",
       "operator": "Sakai Kisen KK",
       "survey": "20271026",
-      "lat": 33.59073,
-      "lng": 136.12531,
-      "speed": 14,
-      "heading": 49,
+      "lat": 33.63082,
+      "lng": 136.18744333333333,
+      "speed": 13.9,
+      "heading": 52,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:48:09.884028592 +0000 UTC"
+      "timestamp": "2026-11-07 12:05:08.689751782 +0000 UTC"
     },
     {
       "mmsi": "565835000",
@@ -23064,13 +23066,13 @@
       "owner": "Matsuyama Kaiun KK",
       "operator": "Tsurumi Sunmarine Co Ltd",
       "survey": "20300228",
-      "lat": 33.8274,
-      "lng": 136.34631,
-      "speed": 13.4,
-      "heading": 230,
+      "lat": 33.78868666666667,
+      "lng": 136.29560333333333,
+      "speed": 13.5,
+      "heading": 226,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-07 11:48:26.281052729 +0000 UTC"
+      "timestamp": "2026-11-07 12:04:47.26643416 +0000 UTC"
     },
     {
       "mmsi": "431100372",
@@ -23109,6 +23111,44 @@
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 11:49:01.429678787 +0000 UTC"
+    },
+    {
+      "mmsi": "431501865",
+      "name": "AZUMA MARU NO. 11",
+      "imo": "9343807",
+      "category": "日本籍船",
+      "flag": "Japan",
+      "type": "Products Tanker",
+      "gt": "3482",
+      "owner": "Azuma Kisen KK",
+      "operator": "Azuma Kisen KK",
+      "survey": "20310726",
+      "lat": 35.49561833333333,
+      "lng": 139.91392833333333,
+      "speed": 0.1,
+      "heading": 14,
+      "destination": "-",
+      "eta": "-",
+      "timestamp": "2026-11-07 12:05:29.356268772 +0000 UTC"
+    },
+    {
+      "mmsi": "352596000",
+      "name": "SHOTAN",
+      "imo": "9709271",
+      "category": "日本支配船",
+      "flag": "Panama",
+      "type": "Chemical/Products Tanker",
+      "gt": "5518",
+      "owner": "Shotan Marine SA",
+      "operator": "Showa Nittan Corp",
+      "survey": "20290207",
+      "lat": 1.231965,
+      "lng": 103.93715833333334,
+      "speed": 14.2,
+      "heading": 245,
+      "destination": "-",
+      "eta": "-",
+      "timestamp": "2026-11-07 12:06:08.122118584 +0000 UTC"
     }
   ]
 }
