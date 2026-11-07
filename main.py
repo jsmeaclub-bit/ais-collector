@@ -18,6 +18,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
 ROUTES_FILE = os.path.join(DATA_DIR, "routes_2026.json")
 
+
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
     sa_info = json.loads(GCP_SA_KEY)
@@ -102,7 +103,6 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         ws_summary = wb.add_worksheet("Route_Summary_2026", 1000, 7)
         ws_summary.append_row(["SegmentID", "Category", "StartLat", "StartLng", "EndLat", "EndLng", "Count"])
 
-    # 1. ライブデータをスプレッドシートに追記
     traffic_records = ws_traffic.get_all_records()
     prev_positions = {str(r.get("MMSI", "")): {"lat": r.get("Latitude"), "lng": r.get("Longitude")} for r in traffic_records if r.get("MMSI")}
     
@@ -126,19 +126,21 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
             end_lat, end_lng = round(float(ship["lat"]), 2), round(float(ship["lng"]), 2)
             
             if start_lat != end_lat or start_lng != end_lng:
-                seg_id = f"{start_lat}_{start_lng}_{end_lat}_{end_lng}"
-                if seg_id in summary_map:
-                    summary_map[seg_id]["count"] += 1
-                    updated_summary_cells.append({"range": f"G{summary_map[seg_id]['row_idx']}", "values": [[summary_map[seg_id]["count"]]]})
-                else:
-                    new_summary_rows.append([seg_id, cat, start_lat, start_lng, end_lat, end_lng, 1])
-                    summary_map[seg_id] = {"row_idx": len(summary_rows) + len(new_summary_rows) + 1, "count": 1}
+                # ★ ワープ切断処理: 1.0度（約111km）以上離れていたら「圏外からの復帰」とみなし、直線を引かない
+                if abs(start_lat - end_lat) < 1.0 and abs(start_lng - end_lng) < 1.0:
+                    seg_id = f"{start_lat}_{start_lng}_{end_lat}_{end_lng}"
+                    if seg_id in summary_map:
+                        summary_map[seg_id]["count"] += 1
+                        updated_summary_cells.append({"range": f"G{summary_map[seg_id]['row_idx']}", "values": [[summary_map[seg_id]["count"]]]})
+                    else:
+                        new_summary_rows.append([seg_id, cat, start_lat, start_lng, end_lat, end_lng, 1])
+                        summary_map[seg_id] = {"row_idx": len(summary_rows) + len(new_summary_rows) + 1, "count": 1}
 
     if new_history_rows: ws_history.append_rows(new_history_rows)
     if new_summary_rows: ws_summary.append_rows(new_summary_rows)
     if updated_summary_cells: ws_summary.batch_update(updated_summary_cells)
 
-    # 2. 全履歴から「各船のフェード軌跡」を計算
+    # 2. 全履歴からの軌跡フェード計算（ワープ切断対応版）
     all_history = ws_history.get_all_values()
     tracks_map = {}
     for row in all_history[1:]:
@@ -157,7 +159,6 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         if len(coords) < 2: continue
         heading = live_ships[mmsi].get("heading", 0.0) if mmsi in live_ships else 0.0
         
-        # 描画負荷軽減
         if len(coords) > 500:
             step = len(coords) / 500.0
             display_coords = [coords[int(i * step)] for i in range(500)]
@@ -165,33 +166,53 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         else:
             display_coords = coords
 
-        smoothed_coords = smooth_line(display_coords, iterations=2)
-        segments = []
-        total_pts = len(smoothed_coords)
-        for i in range(total_pts - 1):
-            ratio = i / (total_pts - 1)
-            # フェード効果: 古いものは透明、新しいものは白く太く
-            opacity = round(0.0 + (0.9 * ratio), 2)
-            weight = round(1.0 + (1.5 * ratio), 1)
-            segments.append({"coords": [smoothed_coords[i], smoothed_coords[i+1]], "opacity": opacity, "weight": weight})
-        routes_output.append({"mmsi": mmsi, "heading": heading, "segments": segments})
+        # ★ ワープ切断処理: 各船の過去ログを辿る際も、1.0度以上のズレがあれば軌跡リストを分割する
+        sub_lines = []
+        curr_sub = [display_coords[0]]
+        for i in range(1, len(display_coords)):
+            prev = display_coords[i-1]
+            curr = display_coords[i]
+            if abs(curr[0] - prev[0]) > 1.0 or abs(curr[1] - prev[1]) > 1.0:
+                if len(curr_sub) >= 2: sub_lines.append(curr_sub)
+                curr_sub = [curr]  # 過去の軌跡は残しつつ、新しい線をここから再開する
+            else:
+                curr_sub.append(curr)
+        if len(curr_sub) >= 2:
+            sub_lines.append(curr_sub)
 
-    # 3. Route_Summary から「年間シーレーンのヒートマップ」を計算
+        segments = []
+        total_pts = sum(len(sub) for sub in sub_lines)
+        
+        if total_pts >= 2:
+            current_idx = 0
+            for sub in sub_lines:
+                smoothed = smooth_line(sub, iterations=2)
+                for i in range(len(smoothed) - 1):
+                    # 分割されていても、時間的な古さ(ratio)は全体の中で正しくフェードさせる
+                    ratio = current_idx / (total_pts - 1)
+                    opacity = round(0.0 + (0.9 * ratio), 2)
+                    weight = round(1.0 + (1.5 * ratio), 1)
+                    segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity, "weight": weight})
+                    current_idx += 1
+
+        if segments:
+            routes_output.append({"mmsi": mmsi, "heading": heading, "segments": segments})
+
+    # 3. 年間シーレーン (Route_Summary_2026) のヒートマップ計算
     all_summary = ws_summary.get_all_records()
     summary_output = []
     for s in all_summary:
         try:
             c = [[float(s["StartLat"]), float(s["StartLng"])], [float(s["EndLat"]), float(s["EndLng"])]]
-            # 通行量(Count)に応じてシーレーンの太さと濃さを変える
             weight = min(5.0, 1.5 + (float(s["Count"]) * 0.2))
             opacity = min(0.9, 0.3 + (float(s["Count"]) * 0.05))
             summary_output.append({"coords": c, "weight": round(weight, 1), "opacity": round(opacity, 2), "cat": s.get("Category", "")})
         except: continue
 
-    # 4. フロントエンドに読み込ませるための 統合JSON を出力
+    # 4. JSON出力
     final_json = {
-        "tracks": routes_output,    # 各船のフェード軌跡
-        "summary": summary_output   # 全体のシーレーン(航路網)
+        "tracks": routes_output,    # 切断・フェード処理済みの軌跡
+        "summary": summary_output   # シーレーン網
     }
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(final_json, f, ensure_ascii=False)
