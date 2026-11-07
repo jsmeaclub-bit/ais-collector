@@ -1,0 +1,48 @@
+name: Update Global AIS Coverage (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: '受信時間（分）'
+        required: true
+        default: '5'
+        type: choice
+        options:
+          - '2'
+          - '5'
+          - '10'
+          - '15'
+
+jobs:
+  update-coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install websockets shapely
+
+      - name: Run Global AIS Coverage Collector
+        env:
+          AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
+          COVERAGE_LISTEN_SECONDS: ${{ github.event.inputs.duration_minutes * 60 }}
+        run: |
+          python update_coverage.py
+
+      - name: Commit and Push Coverage
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add data/coverage_2026.json data/coverage_points.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update global AIS coverage map [skip ci]" && git push)
