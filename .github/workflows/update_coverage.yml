@@ -30,13 +30,13 @@ jobs:
         run: |
           python update_coverage.py
 
-- name: Commit and Push changes
+      - name: Commit and Push Coverage
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add data/
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/coverage_2026.json data/coverage_points.json
           if ! git diff --staged --quiet; then
-            git commit -m "Update AIS traffic data [skip ci]"
+            git commit -m "Update global AIS coverage map [skip ci]"
             git pull --rebase origin main
             git push origin main
           fi
