@@ -39,7 +39,6 @@ def parse_gt(gt_val):
     except:
         return 0.0
 
-# 1. マスターデータの取得（2000GT以上のみ厳格抽出）
 def get_master_data(client):
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Japan_Master")
     records = sheet.get_all_records()
@@ -127,11 +126,9 @@ def smooth_line(coords, iterations=2):
         current = smoothed
     return current
 
-# ★ あらゆる日付形式（11/6/2026, 2026-11-05等）を漏れなく解析する強固な関数
 def robust_parse_timestamp(ts_str):
     ts_str = str(ts_str).strip()
-    if not ts_str:
-        return datetime.min
+    if not ts_str: return datetime.min
     formats = [
         "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
@@ -141,13 +138,10 @@ def robust_parse_timestamp(ts_str):
     ]
     clean_ts = ts_str.split(".")[0].replace(" +0000 UTC", "").replace(" UTC", "").replace("Z", "").replace("T", " ")
     for fmt in formats:
-        try:
-            return datetime.strptime(clean_ts, fmt)
-        except ValueError:
-            pass
+        try: return datetime.strptime(clean_ts, fmt)
+        except ValueError: pass
     return datetime.min
 
-# ★ 海上ルーティングによる補間処理
 def interpolate_sea_route(p1, p2):
     try:
         origin = (p1[1], p1[0])
@@ -156,8 +150,7 @@ def interpolate_sea_route(p1, p2):
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             return [[round(c[1], 4), round(c[0], 4)] for c in coords]
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, client):
@@ -165,7 +158,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     try: ws_history = wb.worksheet("Traffic_History_2026")
     except: ws_history = wb.add_worksheet("Traffic_History_2026", 1000, 15)
     
-    # 1. 2000GT以上の対象船のみ記録
     new_history_rows = []
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
@@ -182,7 +174,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     if new_history_rows:
         ws_history.append_rows(new_history_rows)
 
-    # 2. 全ログ読み込み
     all_history = ws_history.get_all_values()
     tracks_map = {}
     for idx, row in enumerate(all_history[1:]):
@@ -193,15 +184,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             ts = robust_parse_timestamp(row[0])
             pt = [round(float(row[3]), 4), round(float(row[4]), 4)]
             if mmsi_str not in tracks_map: tracks_map[mmsi_str] = []
-            # (日時, 座標, 元の行インデックス) を保持
             tracks_map[mmsi_str].append((ts, pt, idx))
         except: continue
 
     routes_output = []
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
-        
-        # ★ 日時順（日時が同じ場合はシートの行順）で絶対に正しく並べる
         data_list.sort(key=lambda x: (x[0], x[2]))
         
         cleaned_list = []
@@ -209,7 +197,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
-        # ★ 船の現在地シンボルの座標（existing_latest）を軌跡の末尾（現在）に完全スナップ
+        # 現在地シンボルへ吸着
         if mmsi in existing_latest:
             curr_lat = existing_latest[mmsi].get("lat")
             curr_lng = existing_latest[mmsi].get("lng")
@@ -220,41 +208,33 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
         if len(cleaned_list) < 2: continue
         heading = live_ships[mmsi].get("heading", 0.0) if mmsi in live_ships else existing_latest.get(mmsi, {}).get("heading", 0.0)
+        category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # ★ ワープ補間と切断処理（陸地横断を完全に防止）
         sub_lines = []
         curr_sub = [cleaned_list[0][1]]
-        
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p = cleaned_list[i-1]
             curr_t, curr_p = cleaned_list[i]
-            
             dlat = abs(curr_p[0] - prev_p[0])
             dlng = abs(curr_p[1] - prev_p[1])
             
-            # 0.25度（約25km）以上離れている場合は海上ルートを補完
             if dlat > 0.25 or dlng > 0.25:
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
-                    for mid_p in interpolated[1:]:
-                        curr_sub.append(mid_p)
+                    for mid_p in interpolated[1:]: curr_sub.append(mid_p)
                 else:
-                    # 海上ルートが引けない無理なワープは直線を引かずに切断する
                     if len(curr_sub) >= 2: sub_lines.append(curr_sub)
                     curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
-                
-        if len(curr_sub) >= 2:
-            sub_lines.append(curr_sub)
+        if len(curr_sub) >= 2: sub_lines.append(curr_sub)
 
-        # 軌跡セグメントの生成
+        # ★ 「最初ははっきり（航路帯として残る）、最後は消える（現在地付近で消灯）」の比率設定
         segments = []
         total_pts = sum(len(sub) for sub in sub_lines)
         if total_pts >= 2:
             current_idx = 0
             for sub in sub_lines:
-                # 点数が多い場合はリサンプリング
                 if len(sub) > 200:
                     step = len(sub) / 200.0
                     sub_sampled = [sub[int(j * step)] for j in range(200)]
@@ -264,15 +244,15 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     
                 smoothed = smooth_line(sub_sampled, iterations=2)
                 for i in range(len(smoothed) - 1):
+                    # 最初（過去実績）は 0.85 とクッキリ、最後（直近）は 0.10 とフェードアウト
                     ratio = current_idx / (total_pts - 1)
-                    # 末尾は細く透明、先頭（現在地）は白く太く
-                    opacity = round(0.05 + (0.85 * ratio), 2)
-                    weight = round(0.8 + (1.2 * ratio), 1)
-                    segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity, "weight": weight})
+                    opacity = round(0.85 - (0.75 * ratio), 2)
+                    segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity})
                     current_idx += 1
 
         if segments:
-            routes_output.append({"mmsi": mmsi, "heading": heading, "segments": segments})
+            # 日本籍船か外国籍船かの属性（category）を格納
+            routes_output.append({"mmsi": mmsi, "category": category, "heading": heading, "segments": segments})
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
@@ -293,7 +273,6 @@ def main():
                         existing_latest[m_key] = s
         except Exception: pass
 
-    # 新規受信船で更新
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
         m_info = master_map.get(mmsi, {})
@@ -317,7 +296,6 @@ def main():
             "timestamp": ship["timestamp"]
         }
 
-    # Japan_Master の最新情報で再補完
     for mmsi, ship_data in existing_latest.items():
         if mmsi in master_map:
             m = master_map[mmsi]
