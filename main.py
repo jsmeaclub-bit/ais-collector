@@ -18,7 +18,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
 ROUTES_FILE = os.path.join(DATA_DIR, "routes_2026.json")
 
-
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
     sa_info = json.loads(GCP_SA_KEY)
@@ -89,58 +88,37 @@ def smooth_line(coords, iterations=2):
         current = smoothed
     return current
 
-def process_sheets_and_generate_json(live_ships, master_map, client):
+def update_history_and_generate_tracks(live_ships, master_map, client):
     wb = client.open_by_key(SPREADSHEET_ID)
-    
-    try: ws_traffic = wb.worksheet("Route_Traffic")
-    except: ws_traffic = wb.add_worksheet("Route_Traffic", 1000, 15)
-    
     try: ws_history = wb.worksheet("Traffic_History_2026")
     except: ws_history = wb.add_worksheet("Traffic_History_2026", 1000, 15)
     
-    try: ws_summary = wb.worksheet("Route_Summary_2026")
-    except: 
-        ws_summary = wb.add_worksheet("Route_Summary_2026", 1000, 7)
-        ws_summary.append_row(["SegmentID", "Category", "StartLat", "StartLng", "EndLat", "EndLng", "Count"])
-
-    traffic_records = ws_traffic.get_all_records()
-    prev_positions = {str(r.get("MMSI", "")): {"lat": r.get("Latitude"), "lng": r.get("Longitude")} for r in traffic_records if r.get("MMSI")}
-    
-    summary_data = ws_summary.get_all_values()
-    summary_rows = summary_data[1:] if len(summary_data) > 1 else []
-    summary_map = {}
-    for i, r in enumerate(summary_rows):
-        if len(r) > 0: summary_map[r[0]] = {"row_idx": i + 2, "count": int(r[6]) if len(r) > 6 and str(r[6]).isdigit() else 1}
-
-    new_history_rows, updated_summary_cells, new_summary_rows = [], [], []
-    
+    # 1. Traffic_History_2026 へ最新データをフル項目で追記
+    new_history_rows = []
     for mmsi, ship in live_ships.items():
         if ship["lat"] is None or ship["lng"] is None: continue
+        m_info = master_map.get(mmsi, {})
         timestamp = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
-        cat = master_map.get(mmsi, {}).get("category", "")
-        new_history_rows.append([timestamp, mmsi, ship["name"], ship["lat"], ship["lng"], ship["speed"], cat])
+        row = [
+            timestamp,
+            mmsi,
+            ship["name"] or m_info.get("name", ""),
+            ship["lat"],
+            ship["lng"],
+            ship["speed"],
+            m_info.get("category", ""),
+            m_info.get("owner", ""),
+            m_info.get("type", ""),
+            m_info.get("imo", ""),
+            m_info.get("survey", "")
+        ]
+        new_history_rows.append(row)
         
-        prev = prev_positions.get(mmsi)
-        if prev and prev["lat"] and prev["lng"]:
-            start_lat, start_lng = round(float(prev["lat"]), 2), round(float(prev["lng"]), 2)
-            end_lat, end_lng = round(float(ship["lat"]), 2), round(float(ship["lng"]), 2)
-            
-            if start_lat != end_lat or start_lng != end_lng:
-                # ★ ワープ切断処理: 1.0度（約111km）以上離れていたら「圏外からの復帰」とみなし、直線を引かない
-                if abs(start_lat - end_lat) < 1.0 and abs(start_lng - end_lng) < 1.0:
-                    seg_id = f"{start_lat}_{start_lng}_{end_lat}_{end_lng}"
-                    if seg_id in summary_map:
-                        summary_map[seg_id]["count"] += 1
-                        updated_summary_cells.append({"range": f"G{summary_map[seg_id]['row_idx']}", "values": [[summary_map[seg_id]["count"]]]})
-                    else:
-                        new_summary_rows.append([seg_id, cat, start_lat, start_lng, end_lat, end_lng, 1])
-                        summary_map[seg_id] = {"row_idx": len(summary_rows) + len(new_summary_rows) + 1, "count": 1}
+    if new_history_rows:
+        ws_history.append_rows(new_history_rows)
+        print(f"[INFO] Appended {len(new_history_rows)} logs to Traffic_History_2026.")
 
-    if new_history_rows: ws_history.append_rows(new_history_rows)
-    if new_summary_rows: ws_summary.append_rows(new_summary_rows)
-    if updated_summary_cells: ws_summary.batch_update(updated_summary_cells)
-
-    # 2. 全履歴からの軌跡フェード計算（ワープ切断対応版）
+    # 2. 同シートの全ログを読み込んで軌跡を生成
     all_history = ws_history.get_all_values()
     tracks_map = {}
     for row in all_history[1:]:
@@ -159,6 +137,7 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         if len(coords) < 2: continue
         heading = live_ships[mmsi].get("heading", 0.0) if mmsi in live_ships else 0.0
         
+        # 間引き処理
         if len(coords) > 500:
             step = len(coords) / 500.0
             display_coords = [coords[int(i * step)] for i in range(500)]
@@ -166,7 +145,7 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         else:
             display_coords = coords
 
-        # ★ ワープ切断処理: 各船の過去ログを辿る際も、1.0度以上のズレがあれば軌跡リストを分割する
+        # ★ ワープ切断処理 (範囲外から戻ってきた時の直線を切る)
         sub_lines = []
         curr_sub = [display_coords[0]]
         for i in range(1, len(display_coords)):
@@ -174,7 +153,7 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
             curr = display_coords[i]
             if abs(curr[0] - prev[0]) > 1.0 or abs(curr[1] - prev[1]) > 1.0:
                 if len(curr_sub) >= 2: sub_lines.append(curr_sub)
-                curr_sub = [curr]  # 過去の軌跡は残しつつ、新しい線をここから再開する
+                curr_sub = [curr]
             else:
                 curr_sub.append(curr)
         if len(curr_sub) >= 2:
@@ -182,13 +161,11 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
 
         segments = []
         total_pts = sum(len(sub) for sub in sub_lines)
-        
         if total_pts >= 2:
             current_idx = 0
             for sub in sub_lines:
                 smoothed = smooth_line(sub, iterations=2)
                 for i in range(len(smoothed) - 1):
-                    # 分割されていても、時間的な古さ(ratio)は全体の中で正しくフェードさせる
                     ratio = current_idx / (total_pts - 1)
                     opacity = round(0.0 + (0.9 * ratio), 2)
                     weight = round(1.0 + (1.5 * ratio), 1)
@@ -198,24 +175,9 @@ def process_sheets_and_generate_json(live_ships, master_map, client):
         if segments:
             routes_output.append({"mmsi": mmsi, "heading": heading, "segments": segments})
 
-    # 3. 年間シーレーン (Route_Summary_2026) のヒートマップ計算
-    all_summary = ws_summary.get_all_records()
-    summary_output = []
-    for s in all_summary:
-        try:
-            c = [[float(s["StartLat"]), float(s["StartLng"])], [float(s["EndLat"]), float(s["EndLng"])]]
-            weight = min(5.0, 1.5 + (float(s["Count"]) * 0.2))
-            opacity = min(0.9, 0.3 + (float(s["Count"]) * 0.05))
-            summary_output.append({"coords": c, "weight": round(weight, 1), "opacity": round(opacity, 2), "cat": s.get("Category", "")})
-        except: continue
-
-    # 4. JSON出力
-    final_json = {
-        "tracks": routes_output,    # 切断・フェード処理済みの軌跡
-        "summary": summary_output   # シーレーン網
-    }
+    # フラットな配列構造で出力（UI側のエラー回避）
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
-        json.dump(final_json, f, ensure_ascii=False)
+        json.dump(routes_output, f, ensure_ascii=False)
 
 def main():
     client = get_spreadsheet_client()
@@ -244,7 +206,7 @@ def main():
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
         json.dump({"masterCounts": master_counts, "latest": list(existing_latest.values())}, f, ensure_ascii=False, indent=2)
 
-    process_sheets_and_generate_json(live_ships, master_map, client)
+    update_history_and_generate_tracks(live_ships, master_map, client)
 
 if __name__ == "__main__":
     main()
