@@ -39,6 +39,16 @@ def parse_gt(gt_val):
     except:
         return 0.0
 
+# 2点間の緯度経度から進行方位角（0〜360度）を計算
+def calculate_bearing(p1, p2):
+    lat1 = math.radians(p1[0])
+    lat2 = math.radians(p2[0])
+    diff_long = math.radians(p2[1] - p1[1])
+    x = math.sin(diff_long) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(diff_long))
+    initial_bearing = math.degrees(math.atan2(x, y))
+    return round((initial_bearing + 360) % 360, 1)
+
 def get_master_data(client):
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Japan_Master")
     records = sheet.get_all_records()
@@ -100,8 +110,6 @@ async def collect_ais_data(target_mmsis):
                         received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
                         received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
                         received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
-                        cog, hdg = pos.get("Cog", 0.0), pos.get("TrueHeading", 511)
-                        received[mmsi]["heading"] = round(hdg if hdg != 511 else cog, 1)
                     elif data.get("MessageType") == "ShipStaticData":
                         static = data.get("Message", {}).get("ShipStaticData", {})
                         if dest := static.get("Destination", "").strip():
@@ -188,6 +196,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         except: continue
 
     routes_output = []
+    calculated_headings = {}
+
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
         data_list.sort(key=lambda x: (x[0], x[2]))
@@ -207,7 +217,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     cleaned_list.append((datetime.now(timezone.utc), latest_pt))
 
         if len(cleaned_list) < 2: continue
-        heading = live_ships[mmsi].get("heading", 0.0) if mmsi in live_ships else existing_latest.get(mmsi, {}).get("heading", 0.0)
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
         sub_lines = []
@@ -229,7 +238,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 curr_sub.append(curr_p)
         if len(curr_sub) >= 2: sub_lines.append(curr_sub)
 
-        # ★ 「最初ははっきり（航路帯として残る）、最後は消える（現在地付近で消灯）」の比率設定
+        # ★ 軌跡直近の進行方向から方位角（bearing）をサーバー側で完全算出
+        heading = 0.0
+        if len(sub_lines) > 0 and len(sub_lines[-1]) >= 2:
+            p_prev = sub_lines[-1][-2]
+            p_last = sub_lines[-1][-1]
+            heading = calculate_bearing(p_prev, p_last)
+            calculated_headings[mmsi] = heading
+
         segments = []
         total_pts = sum(len(sub) for sub in sub_lines)
         if total_pts >= 2:
@@ -244,18 +260,28 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     
                 smoothed = smooth_line(sub_sampled, iterations=2)
                 for i in range(len(smoothed) - 1):
-                    # 最初（過去実績）は 0.85 とクッキリ、最後（直近）は 0.10 とフェードアウト
                     ratio = current_idx / (total_pts - 1)
                     opacity = round(0.85 - (0.75 * ratio), 2)
                     segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity})
                     current_idx += 1
 
         if segments:
-            # 日本籍船か外国籍船かの属性（category）を格納
-            routes_output.append({"mmsi": mmsi, "category": category, "heading": heading, "segments": segments})
+            routes_output.append({
+                "mmsi": mmsi, 
+                "category": category, 
+                "heading": heading, 
+                "segments": segments
+            })
 
+    # ★ 全船舶の heading を確定（軌跡があれば計算値、軌跡がなければ一律 0.0 [真北]）
+    for mmsi, ship in existing_latest.items():
+        ship["heading"] = calculated_headings.get(mmsi, 0.0)
+
+    # 各JSONの出力
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
+
+    return calculated_headings
 
 def main():
     client = get_spreadsheet_client()
@@ -290,7 +316,7 @@ def main():
             "lat": ship["lat"],
             "lng": ship["lng"],
             "speed": ship["speed"],
-            "heading": ship["heading"],
+            "heading": 0.0,
             "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
             "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
             "timestamp": ship["timestamp"]
@@ -310,10 +336,12 @@ def main():
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
 
+    # 軌跡生成および方位角の一括確定
+    update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
+
+    # 確定した方位角付きで最新位置JSONを書き出し
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
         json.dump({"masterCounts": master_counts, "latest": list(existing_latest.values())}, f, ensure_ascii=False, indent=2)
-
-    update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
 
 if __name__ == "__main__":
     main()
