@@ -2,6 +2,7 @@ import os
 import json
 import time
 import math
+import random
 import asyncio
 import websockets
 import requests
@@ -24,8 +25,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage_2026.json")
 POINTS_CACHE_FILE = os.path.join(DATA_DIR, "coverage_points.json")
-
-LISTEN_DURATION_SEC = 120  # 1回の受信待機時間（秒）
 
 
 # ==========================================
@@ -58,7 +57,6 @@ def get_master_data():
         flag_cnt, ctrl_cnt = 0, 0
 
         for r in records:
-            # MMSIの正規化（数値・文字列・小数の混入を除去）
             raw_mmsi = str(r.get("MMSI", "")).strip().split(".")[0]
             if not raw_mmsi or raw_mmsi in ("nan", "None", "0"):
                 continue
@@ -100,12 +98,27 @@ def get_master_data():
 # ==========================================
 async def collect_ais_data(target_mmsis):
     """
-    AISStream.io の WebSocket に接続し、対象 MMSI の船舶データを受信
+    AISStream.io の WebSocket に接続し、対象 MMSI の船舶データを受信。
+    ・手動実行（workflow_dispatch やローカル確認）: 2分（120秒）固定
+    ・スケジュール実行（cron）: 2分（120秒）〜10分（600秒）の間でランダム
     """
     received_ships = {}
     if not AISSTREAM_API_KEY:
         print("[ERROR] AISSTREAM_API_KEY is not set.")
         return received_ships
+
+    # 実行契機に応じた待機時間の切り替え
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    if event_name == "schedule":
+        listen_duration = random.randint(120, 600)
+        mode_desc = "Scheduled run (randomized)"
+    else:
+        listen_duration = 120
+        mode_desc = "Manual run (fixed 2m for quick testing)"
+
+    mins, secs = divmod(listen_duration, 60)
+    print(f"[INFO] Mode: {mode_desc}")
+    print(f"[INFO] Connecting to AISStream.io for {listen_duration} seconds ({mins}m {secs}s)...")
 
     url = "wss://stream.aisstream.io/v0/stream"
     subscribe_msg = {
@@ -114,19 +127,17 @@ async def collect_ais_data(target_mmsis):
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
     }
 
-    print(f"[INFO] Connecting to AISStream.io for {LISTEN_DURATION_SEC} seconds...")
     try:
         async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
             await ws.send(json.dumps(subscribe_msg))
             start_time = time.time()
 
-            while time.time() - start_time < LISTEN_DURATION_SEC:
+            while time.time() - start_time < listen_duration:
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     data = json.loads(msg)
                     mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
 
-                    # 監視対象外の船舶は破棄
                     if mmsi not in target_mmsis:
                         continue
 
@@ -181,9 +192,9 @@ async def collect_ais_data(target_mmsis):
 # ==========================================
 # 3. AIS受信実績圏（50海里）の即時動的更新
 # ==========================================
-def update_coverage_geojson(live_points):
+def update_coverage_geojson(all_points_list):
     """
-    受信したすべての地点（過去キャッシュ＋最新地点）から
+    受信したすべての船舶位置（蓄積全隻）から
     半径50海里（約92.6km）のバッファポリゴンを生成し coverage_2026.json を更新
     """
     all_points = set()
@@ -197,8 +208,8 @@ def update_coverage_geojson(live_points):
         except Exception:
             all_points = set()
 
-    # 2. 今回受信した最新座標を追加（0.05度刻みで丸めて重複排除・ファイル肥大化防止）
-    for lat, lng in live_points:
+    # 2. 最新座標を追加
+    for lat, lng in all_points_list:
         if lat is not None and lng is not None:
             all_points.add((round(lat, 2), round(lng, 2)))
 
@@ -209,24 +220,24 @@ def update_coverage_geojson(live_points):
     if not all_points:
         return
 
-    # 3. 半径50海里（約0.833度）のバッファ円を緯度経度補正付きで作成
+    # 3. 半径50海里（約0.833度）のバッファ円を作成
     radius_deg = 50.0 / 60.0
     polygons = []
 
     for lat, lng in all_points:
         cos_lat = math.cos(math.radians(lat))
         if cos_lat < 0.1:
-            cos_lat = 0.1  # 極地付近でのゼロ除算防止
+            cos_lat = 0.1
 
         pts = []
-        for i in range(16):  # 16角形で円を近似
+        for i in range(16):
             angle = 2 * math.pi * i / 16
             dx = (radius_deg / cos_lat) * math.cos(angle)
             dy = radius_deg * math.sin(angle)
             pts.append((lng + dx, lat + dy))
         polygons.append(Polygon(pts))
 
-    # 全ポリゴンを統合し、トポロジーを簡素化（描画パフォーマンス向上）
+    # 全ポリゴンを統合し、GeoJSONとして書き出し
     merged_polygon = unary_union(polygons)
     simplified_geom = merged_polygon.simplify(0.02, preserve_topology=True)
 
@@ -275,7 +286,7 @@ def main():
         except Exception:
             existing_latest = {}
 
-# 4. 最新位置情報とマスター属性のマージ
+    # 4. 最新位置情報とマスター属性のマージ
     for mmsi, ship in live_ships.items():
         m_info = master_map.get(mmsi, {})
         merged_ship = {
@@ -299,7 +310,7 @@ def main():
         }
         existing_latest[mmsi] = merged_ship
 
-# 5. latest_2026.json の書き出し
+    # 5. latest_2026.json の書き出し
     latest_output = {
         "masterCounts": master_counts,
         "latest": list(existing_latest.values())
@@ -309,7 +320,7 @@ def main():
 
     print(f"[INFO] latest_2026.json saved. Total monitored in latest: {len(existing_latest)} vessels.")
 
-# 6. 蓄積された全隻の有効座標から50海里圏を一括生成（※main関数の中なのでスペース4個インデント）
+    # 6. 蓄積された全隻の有効座標から50海里圏を一括生成
     all_active_points = [
         (s["lat"], s["lng"])
         for s in existing_latest.values()
@@ -318,11 +329,5 @@ def main():
     update_coverage_geojson(all_active_points)
 
 
-# ★ ファイルの最末尾（左端・インデントなし）はこの2行だけにする
 if __name__ == "__main__":
     main()
-
-
-if __name__ == "__main__":
-    main()
-    update_coverage_geojson(all_active_points)
