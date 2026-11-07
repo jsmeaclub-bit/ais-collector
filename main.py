@@ -39,7 +39,6 @@ def parse_gt(gt_val):
     except:
         return 0.0
 
-# 2点間の緯度経度から進行方位角（0〜360度）を計算
 def calculate_bearing(p1, p2):
     lat1 = math.radians(p1[0])
     lat2 = math.radians(p2[0])
@@ -83,6 +82,7 @@ def get_master_data(client):
 async def collect_ais_data(target_mmsis):
     received = {}
     if not AISSTREAM_API_KEY: return received
+    # 手動実行時は30秒
     duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
     url = "wss://stream.aisstream.io/v0/stream"
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": [[[-90, -180], [90, 180]]], "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
@@ -207,18 +207,20 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
-        # 現在地シンボルへ吸着
+        # 最新位置の取得
+        latest_coord = None
         if mmsi in existing_latest:
             curr_lat = existing_latest[mmsi].get("lat")
             curr_lng = existing_latest[mmsi].get("lng")
             if curr_lat is not None and curr_lng is not None:
-                latest_pt = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-                if not cleaned_list or cleaned_list[-1][1] != latest_pt:
-                    cleaned_list.append((datetime.now(timezone.utc), latest_pt))
+                latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
+                if not cleaned_list or cleaned_list[-1][1] != latest_coord:
+                    cleaned_list.append((datetime.now(timezone.utc), latest_coord))
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
+        # ★★★ 軌跡の構築：最新位置を絶対に脱落させないロジック ★★★
         sub_lines = []
         curr_sub = [cleaned_list[0][1]]
         for i in range(1, len(cleaned_list)):
@@ -230,15 +232,24 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if dlat > 0.25 or dlng > 0.25:
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
-                    for mid_p in interpolated[1:]: curr_sub.append(mid_p)
+                    for mid_p in interpolated[1:]:
+                        curr_sub.append(mid_p)
                 else:
-                    if len(curr_sub) >= 2: sub_lines.append(curr_sub)
-                    curr_sub = [curr_p]
+                    # searouteが取得できない大洋上でも、最新位置へ向かう航跡は途切れさせず接続
+                    curr_sub.append(curr_p)
             else:
                 curr_sub.append(curr_p)
-        if len(curr_sub) >= 2: sub_lines.append(curr_sub)
 
-        # ★ 軌跡直近の進行方向から方位角（bearing）をサーバー側で完全算出
+        if len(curr_sub) >= 2:
+            sub_lines.append(curr_sub)
+        elif len(curr_sub) == 1 and sub_lines:
+            sub_lines[-1].append(curr_sub[0])
+
+        # ★ 最終セグメントの先端を最新座標（船の位置）に強制吸着
+        if latest_coord and sub_lines and sub_lines[-1]:
+            sub_lines[-1][-1] = latest_coord
+
+        # 進行方位角の算出
         heading = 0.0
         if len(sub_lines) > 0 and len(sub_lines[-1]) >= 2:
             p_prev = sub_lines[-1][-2]
@@ -246,6 +257,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             heading = calculate_bearing(p_prev, p_last)
             calculated_headings[mmsi] = heading
 
+        # 最初は薄く（0.18）、最新位置が最もはっきり（0.95）
         segments = []
         total_pts = sum(len(sub) for sub in sub_lines)
         if total_pts >= 2:
@@ -261,7 +273,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 smoothed = smooth_line(sub_sampled, iterations=2)
                 for i in range(len(smoothed) - 1):
                     ratio = current_idx / (total_pts - 1)
-                    opacity = round(0.85 - (0.75 * ratio), 2)
+                    opacity = round(0.18 + (0.77 * ratio), 2)
                     segments.append({"coords": [smoothed[i], smoothed[i+1]], "opacity": opacity})
                     current_idx += 1
 
@@ -273,11 +285,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
-    # ★ 全船舶の heading を確定（軌跡があれば計算値、軌跡がなければ一律 0.0 [真北]）
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, 0.0)
 
-    # 各JSONの出力
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
 
@@ -336,10 +346,8 @@ def main():
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
 
-    # 軌跡生成および方位角の一括確定
     update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
 
-    # 確定した方位角付きで最新位置JSONを書き出し
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
         json.dump({"masterCounts": master_counts, "latest": list(existing_latest.values())}, f, ensure_ascii=False, indent=2)
 
