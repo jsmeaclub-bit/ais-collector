@@ -11,9 +11,6 @@ from shapely.ops import unary_union
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ==========================================
-# 共通設定・環境変数
-# ==========================================
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
@@ -24,17 +21,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage_2026.json")
 POINTS_CACHE_FILE = os.path.join(DATA_DIR, "coverage_points.json")
-# ★ 航跡用のファイルを追加
 TRACKS_CACHE_FILE = os.path.join(DATA_DIR, "tracks_cache_2026.json")
 ROUTES_FILE = os.path.join(DATA_DIR, "routes_2026.json")
 
-# 航跡の最大保持ポイント数（1隻あたり）
-MAX_TRACK_POINTS = 50
+# ★ 測定期間（最大1年分：1日24回×365日 ＝ 約8760ポイント）の軌跡をすべて保持
+MAX_TRACK_POINTS = 8760
 
-
-# ==========================================
-# 1. マスターデータの取得
-# ==========================================
 def get_master_data():
     if not GCP_SA_KEY or not SPREADSHEET_ID:
         print("[ERROR] GCP_SA_KEY or SPREADSHEET_ID is not configured in Secrets.")
@@ -75,10 +67,6 @@ def get_master_data():
         print(f"[ERROR] Failed to fetch master: {e}")
         return {}, {}
 
-
-# ==========================================
-# 2. AISStream.io からデータ受信
-# ==========================================
 async def collect_ais_data(target_mmsis):
     received_ships = {}
     if not AISSTREAM_API_KEY: return received_ships
@@ -123,10 +111,6 @@ async def collect_ais_data(target_mmsis):
     print(f"[INFO] Collected live data for {len(received_ships)} target vessels.")
     return received_ships
 
-
-# ==========================================
-# 3. AIS受信実績圏（50海里）の更新
-# ==========================================
 def update_coverage_geojson(all_points_list):
     all_points = set()
     if os.path.exists(POINTS_CACHE_FILE):
@@ -150,12 +134,7 @@ def update_coverage_geojson(all_points_list):
     geojson_data = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"name": "AIS Coverage (50nm)"}, "geometry": mapping(simplified_geom)}]}
     with open(COVERAGE_FILE, "w", encoding="utf-8") as f: json.dump(geojson_data, f, ensure_ascii=False)
 
-
-# ==========================================
-# ★ 4. 航跡の平滑化 (Chaikin スプライン) と保存
-# ==========================================
-def smooth_line(coords, iterations=3):
-    """ 座標リストを滑らかなスプライン曲線に補間する """
+def smooth_line(coords, iterations=2):
     if len(coords) < 3: return coords
     current = coords
     for _ in range(iterations):
@@ -175,57 +154,57 @@ def update_routes(live_ships):
             with open(TRACKS_CACHE_FILE, "r", encoding="utf-8") as f: tracks_map = json.load(f)
         except Exception: pass
 
-    # 新しい座標の追加
+    # 1. 座標データの蓄積（最大1年分）
     for mmsi, ship in live_ships.items():
         if ship["lat"] is None or ship["lng"] is None: continue
         if mmsi not in tracks_map: tracks_map[mmsi] = []
         new_pt = [round(ship["lat"], 4), round(ship["lng"], 4)]
         if not tracks_map[mmsi] or tracks_map[mmsi][-1] != new_pt:
             tracks_map[mmsi].append(new_pt)
-        # 保持数オーバーは古いものから削除
         if len(tracks_map[mmsi]) > MAX_TRACK_POINTS:
             tracks_map[mmsi] = tracks_map[mmsi][-MAX_TRACK_POINTS:]
 
     with open(TRACKS_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(tracks_map, f)
 
-    # Web画面用 (routes_2026.json) にスプライン処理して出力
+    # 2. 全軌跡に対するグラデーション・フェード効果の計算
     routes_output = []
     for mmsi, coords in tracks_map.items():
         if len(coords) < 2: continue
+        heading = live_ships[mmsi].get("heading", 0.0) if mmsi in live_ships else 0.0
         
-        # 航行中とみなす船のみフェード（白線）を追加
-        is_moving = False
-        heading = 0.0
-        if mmsi in live_ships:
-            is_moving = live_ships[mmsi].get("speed", 0) > 1.0
-            heading = live_ships[mmsi].get("heading", 0.0)
-            
-        smoothed_coords = smooth_line(coords, iterations=3)
-        
-        route_obj = {"mmsi": mmsi, "heading": heading, "coords": smoothed_coords}
-        
-        if is_moving:
-            segments = []
-            total_pts = len(smoothed_coords)
-            # フェード効果のために後ろから数ポイントだけを抽出
-            fade_len = min(15, total_pts) 
-            tail_coords = smoothed_coords[-fade_len:]
-            for i in range(len(tail_coords) - 1):
-                opacity = 0.2 + (0.6 * (i / (len(tail_coords) - 1)))
-                weight = 1.0 + (1.2 * (i / (len(tail_coords) - 1)))
-                segments.append({"coords": [tail_coords[i], tail_coords[i+1]], "opacity": round(opacity, 2), "weight": round(weight, 1)})
-            route_obj["segments"] = segments
+        # ブラウザの負荷を下げるため、表示用の点は最大300点に間引く（期間は1年のまま粗くする）
+        if len(coords) > 300:
+            step = len(coords) / 300.0
+            display_coords = [coords[int(i * step)] for i in range(300)]
+            if display_coords[-1] != coords[-1]: display_coords.append(coords[-1])
+        else:
+            display_coords = coords
 
-        routes_output.append(route_obj)
+        smoothed_coords = smooth_line(display_coords, iterations=2)
+        
+        segments = []
+        total_pts = len(smoothed_coords)
+        for i in range(total_pts - 1):
+            ratio = i / (total_pts - 1) # 0.0(最古) -> 1.0(最新)
+            opacity = round(0.0 + (0.9 * ratio), 2) # 最古は完全に透明にして消す
+            weight = round(1.0 + (1.5 * ratio), 1)  # 最新に近づくほど太くする
+            
+            segments.append({
+                "coords": [smoothed_coords[i], smoothed_coords[i+1]],
+                "opacity": opacity,
+                "weight": weight
+            })
+
+        routes_output.append({
+            "mmsi": mmsi,
+            "heading": heading,
+            "segments": segments # 全長グラデーションデータ
+        })
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
-    print(f"[INFO] routes_2026.json saved with {len(routes_output)} smoothed tracks.")
+    print(f"[INFO] routes_2026.json saved with {len(routes_output)} fading tracks.")
 
-
-# ==========================================
-# 5. メインルーチン
-# ==========================================
 def main():
     master_map, master_counts = get_master_data()
     if not master_map: return
@@ -242,20 +221,12 @@ def main():
     for mmsi, ship in live_ships.items():
         m_info = master_map.get(mmsi, {})
         existing_latest[mmsi] = {
-            "mmsi": mmsi,
-            "name": m_info.get("name") or ship["name"] or f"MMSI:{mmsi}",
-            "imo": m_info.get("imo", "-"),
-            "category": m_info.get("category", "日本船社運航船"),
-            "flag": m_info.get("flag", "-"),
-            "type": m_info.get("type", "-"),
-            "gt": m_info.get("gt", "-"),
-            "owner": m_info.get("owner", "-"),
-            "operator": m_info.get("operator", "-"),
-            "survey": m_info.get("survey", "-"),
+            "mmsi": mmsi, "name": m_info.get("name") or ship["name"] or f"MMSI:{mmsi}", "imo": m_info.get("imo", "-"),
+            "category": m_info.get("category", "日本船社運航船"), "flag": m_info.get("flag", "-"), "type": m_info.get("type", "-"),
+            "gt": m_info.get("gt", "-"), "owner": m_info.get("owner", "-"), "operator": m_info.get("operator", "-"), "survey": m_info.get("survey", "-"),
             "lat": ship["lat"], "lng": ship["lng"], "speed": ship["speed"], "heading": ship["heading"],
             "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
-            "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
-            "timestamp": ship["timestamp"]
+            "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"), "timestamp": ship["timestamp"]
         }
 
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
@@ -264,7 +235,7 @@ def main():
     all_active_points = [(s["lat"], s["lng"]) for s in existing_latest.values() if s.get("lat") is not None and s.get("lng") is not None]
     
     update_coverage_geojson(all_active_points)
-    update_routes(live_ships)  # ★ 航跡の生成とスプライン平滑化を実行
+    update_routes(live_ships)
 
 
 if __name__ == "__main__":
