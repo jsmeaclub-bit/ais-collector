@@ -50,7 +50,7 @@ def get_master_data():
         client = gspread.authorize(creds)
 
         # スプレッドシートを開き、Japan_Master シートの全レコードを取得
-        spreadsheet = client.open_by_key(spreadsheet_id)
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
         sheet = spreadsheet.worksheet("Japan_Master")
         records = sheet.get_all_records()
 
