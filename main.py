@@ -8,46 +8,100 @@ import requests
 from datetime import datetime, timezone
 from shapely.geometry import Polygon, mapping
 from shapely.ops import unary_union
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 設定・環境変数
+# 共通設定・環境変数
 # ==========================================
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
-GAS_WEBHOOK_URL = os.environ.get("GAS_WEBHOOK_URL")
+GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
-ROUTES_FILE = os.path.join(DATA_DIR, "routes_2026.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage_2026.json")
 POINTS_CACHE_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 
-LISTEN_DURATION_SEC = 120  # 受信待機時間（秒）
+LISTEN_DURATION_SEC = 120  # 1回の受信待機時間（秒）
+
 
 # ==========================================
-# 1. マスターデータの取得 (GAS Webhook経由)
+# 1. マスターデータの取得 (Google Sheets API / サービスアカウント)
 # ==========================================
 def get_master_data():
-    if not GAS_WEBHOOK_URL:
-        print("[WARN] GAS_WEBHOOK_URL is not set.")
+    """
+    サービスアカウント認証を用いて Google スプレッドシート（Japan_Master シート）から
+    モニタリング対象船マスターを直接取得
+    """
+    if not GCP_SA_KEY or not SPREADSHEET_ID:
+        print("[ERROR] GCP_SA_KEY or SPREADSHEET_ID is not configured in Secrets.")
         return {}, {}
+
     try:
-        resp = requests.get(GAS_WEBHOOK_URL, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            master_map = {str(item["mmsi"]): item for item in data.get("master", []) if item.get("mmsi")}
-            master_counts = data.get("masterCounts", {})
-            print(f"[INFO] Loaded {len(master_map)} target vessels from Japan_Master.")
-            return master_map, master_counts
+        sa_info = json.loads(GCP_SA_KEY)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/drive.readonly"
+        ]
+        creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
+        client = gspread.authorize(creds)
+
+        # スプレッドシートを開き、Japan_Master シートの全レコードを取得
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        sheet = spreadsheet.worksheet("Japan_Master")
+        records = sheet.get_all_records()
+
+        master_map = {}
+        flag_cnt, ctrl_cnt = 0, 0
+
+        for r in records:
+            # MMSIの正規化（数値・文字列・小数の混入を除去）
+            raw_mmsi = str(r.get("MMSI", "")).strip().split(".")[0]
+            if not raw_mmsi or raw_mmsi in ("nan", "None", "0"):
+                continue
+
+            category = str(r.get("Category", "日本船社運航船")).strip()
+            if category == "日本籍船":
+                flag_cnt += 1
+            else:
+                ctrl_cnt += 1
+
+            master_map[raw_mmsi] = {
+                "mmsi": raw_mmsi,
+                "name": str(r.get("Name of Ship", "")).strip(),
+                "imo": str(r.get("IMO/LR/IHS No.", "-")).strip(),
+                "category": category,
+                "flag": str(r.get("Flag", "-")).strip(),
+                "type": str(r.get("Ship Type", "-")).strip(),
+                "gt": str(r.get("GT", "-")).strip(),
+                "owner": str(r.get("Registered Owner", "-")).strip(),
+                "operator": str(r.get("Operator", "-")).strip(),
+                "survey": str(r.get("Special Survey", "-")).strip()
+            }
+
+        master_counts = {
+            "total": len(master_map),
+            "flag": flag_cnt,
+            "ctrl": ctrl_cnt
+        }
+        print(f"[INFO] Successfully loaded {len(master_map)} target vessels from Google Spreadsheet.")
+        return master_map, master_counts
+
     except Exception as e:
-        print(f"[ERROR] Failed to fetch master data: {e}")
-    return {}, {}
+        print(f"[ERROR] Failed to fetch master from Google Spreadsheet: {e}")
+        return {}, {}
+
 
 # ==========================================
 # 2. AISStream.io からデータ受信
 # ==========================================
 async def collect_ais_data(target_mmsis):
+    """
+    AISStream.io の WebSocket に接続し、対象 MMSI の船舶データを受信
+    """
     received_ships = {}
     if not AISSTREAM_API_KEY:
         print("[ERROR] AISSTREAM_API_KEY is not set.")
@@ -70,8 +124,9 @@ async def collect_ais_data(target_mmsis):
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     data = json.loads(msg)
-                    mmsi = str(data.get("MetaData", {}).get("MMSI", ""))
+                    mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
 
+                    # 監視対象外の船舶は破棄
                     if mmsi not in target_mmsis:
                         continue
 
@@ -104,7 +159,8 @@ async def collect_ais_data(target_mmsis):
                     elif msg_type == "ShipStaticData":
                         static = data.get("Message", {}).get("ShipStaticData", {})
                         dest = static.get("Destination", "").strip()
-                        if dest: ship["destination"] = dest
+                        if dest:
+                            ship["destination"] = dest
                         eta = static.get("Eta", {})
                         if eta and eta.get("Month"):
                             ship["eta"] = f"{eta.get('Month'):02d}-{eta.get('Day'):02d} {eta.get('Hour'):02d}:{eta.get('Minute'):02d}"
@@ -121,17 +177,18 @@ async def collect_ais_data(target_mmsis):
     print(f"[INFO] Collected live data for {len(received_ships)} target vessels.")
     return received_ships
 
+
 # ==========================================
-# 3. ★ 最新地点を取り込んだAIS受信実績圏（50海里）の即時更新
+# 3. AIS受信実績圏（50海里）の即時動的更新
 # ==========================================
 def update_coverage_geojson(live_points):
     """
-    過去の受信地点キャッシュと今回の最新位置を合算し、
-    周囲50海里（約92.6km）のバッファGeoJSON（coverage_2026.json）を即座に再生成
+    受信したすべての地点（過去キャッシュ＋最新地点）から
+    半径50海里（約92.6km）のバッファポリゴンを生成し coverage_2026.json を更新
     """
     all_points = set()
 
-    # 既存の地点キャッシュを読み込み
+    # 1. 過去地点のキャッシュ読み込み
     if os.path.exists(POINTS_CACHE_FILE):
         try:
             with open(POINTS_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -140,38 +197,37 @@ def update_coverage_geojson(live_points):
         except Exception:
             all_points = set()
 
-    # 今回受信した最新位置を丸めて追加（0.05度単位で重複排除し肥大化を防止）
+    # 2. 今回受信した最新座標を追加（0.05度刻みで丸めて重複排除・ファイル肥大化防止）
     for lat, lng in live_points:
         if lat is not None and lng is not None:
             all_points.add((round(lat, 2), round(lng, 2)))
 
-    # 更新された地点キャッシュを保存
+    # キャッシュの保存
     with open(POINTS_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump([list(p) for p in all_points], f)
 
     if not all_points:
         return
 
-    # 半径50海里（約0.833度）の円ポリゴンを生成（緯度に応じた経度補正付き）
+    # 3. 半径50海里（約0.833度）のバッファ円を緯度経度補正付きで作成
     radius_deg = 50.0 / 60.0
     polygons = []
 
     for lat, lng in all_points:
         cos_lat = math.cos(math.radians(lat))
-        if cos_lat < 0.1: cos_lat = 0.1
-        
-        # 16角形で円を近似
+        if cos_lat < 0.1:
+            cos_lat = 0.1  # 極地付近でのゼロ除算防止
+
         pts = []
-        for i in range(16):
+        for i in range(16):  # 16角形で円を近似
             angle = 2 * math.pi * i / 16
             dx = (radius_deg / cos_lat) * math.cos(angle)
             dy = radius_deg * math.sin(angle)
             pts.append((lng + dx, lat + dy))
         polygons.append(Polygon(pts))
 
-    # 全ポリゴンをマージして単一の領域に統合
+    # 全ポリゴンを統合し、トポロジーを簡素化（描画パフォーマンス向上）
     merged_polygon = unary_union(polygons)
-    # 容量削減のため頂点を適正化（ブラウザ描画の高速化）
     simplified_geom = merged_polygon.simplify(0.02, preserve_topology=True)
 
     geojson_data = {
@@ -192,17 +248,23 @@ def update_coverage_geojson(live_points):
         json.dump(geojson_data, f, ensure_ascii=False)
     print(f"[INFO] coverage_2026.json updated successfully with {len(all_points)} ground-coverage points.")
 
+
 # ==========================================
-# 4. メイン実行フロー
+# 4. メインルーチン
 # ==========================================
 def main():
+    # 1. マスターデータの取得
     master_map, master_counts = get_master_data()
     target_mmsis = set(master_map.keys())
 
-    # 1. AISストリーム受信
+    if not target_mmsis:
+        print("[WARN] No target MMSIs loaded. Terminating run.")
+        return
+
+    # 2. AISストリーム受信の実行
     live_ships = asyncio.run(collect_ais_data(target_mmsis))
 
-    # 2. 既存の最新データとマージ
+    # 3. 既存の最新状態（latest_2026.json）の読み込み
     existing_latest = {}
     if os.path.exists(LATEST_FILE):
         try:
@@ -213,6 +275,7 @@ def main():
         except Exception:
             existing_latest = {}
 
+    # 4. 最新位置情報とマスター属性のマージ
     live_points = []
     for mmsi, ship in live_ships.items():
         m_info = master_map.get(mmsi, {})
@@ -236,33 +299,23 @@ def main():
             "timestamp": ship["timestamp"]
         }
         existing_latest[mmsi] = merged_ship
+
         if ship["lat"] is not None and ship["lng"] is not None:
             live_points.append((ship["lat"], ship["lng"]))
 
-    # 3. latest_2026.json の保存
+    # 5. latest_2026.json の書き出し
     latest_output = {
         "masterCounts": master_counts,
         "latest": list(existing_latest.values())
     }
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
         json.dump(latest_output, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] latest_2026.json saved. Total monitored in latest: {len(existing_latest)}")
 
-    # 4. ★ AIS実績エリア（coverage_2026.json）の即時更新
+    print(f"[INFO] latest_2026.json saved. Total monitored in latest: {len(existing_latest)} vessels.")
+
+    # 6. AIS実績圏（coverage_2026.json）の即時更新
     update_coverage_geojson(live_points)
 
-    # 5. GAS側へも最新サマリーを同期（Webhook POST）
-    if GAS_WEBHOOK_URL and live_ships:
-        try:
-            payload = {
-                "action": "batch_update",
-                "received_count": len(live_ships),
-                "total_monitored": len(existing_latest),
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            requests.post(GAS_WEBHOOK_URL, json=payload, timeout=15)
-        except Exception as e:
-            print(f"[WARN] Failed to notify GAS: {e}")
 
 if __name__ == "__main__":
     main()
