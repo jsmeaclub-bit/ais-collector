@@ -33,7 +33,7 @@ jobs:
         run: |
           python main.py
 
-      - name: Commit and Push changes
+- name: Commit and Push changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -42,5 +42,6 @@ jobs:
             echo "No changes detected in data directory."
           else
             git commit -m "Auto-update fleet data and tracks [skip ci]"
-            git push
+            git pull --rebase origin main
+            git push origin main
           fi
