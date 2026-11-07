@@ -1,16 +1,18 @@
-name: Scheduled AIS Collection & Route Update
+name: ais_collector
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    # 30分間隔で実行（GitHubサーバーの混雑集中を避けるため毎時12分と42分に実行）
+    - cron: '12,42 * * * *'
+    # ※ 1時間間隔（毎時1回）に抑えたい場合は上記をコメントアウトし、下記を有効化してください
+    # - cron: '15 * * * *'
+  workflow_dispatch: # Actions画面からの手動実行ボタン
 
 jobs:
   collect-and-update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 収集データの自動pushに必要な書き込み権限
 
     steps:
       - name: Checkout code
@@ -23,7 +25,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install websockets requests shapely searoute opencv-python-headless numpy
+          python -m pip install --upgrade pip
+          pip install searoute shapely scipy numpy websockets requests
 
       - name: Run AIS Collector and Route Builder
         env:
@@ -37,4 +40,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git diff --staged --quiet || (git commit -m "Auto-update: Ship tracks, positions, and coverage [skip ci]" && git push)
+          # 差分がある場合のみコミット＆プッシュを実行
+          if git diff --staged --quiet; then
+            echo "No changes detected in data directory."
+          else
+            git commit -m "Auto-update fleet data and tracks [skip ci]"
+            git push
+          fi
