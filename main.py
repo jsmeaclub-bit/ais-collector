@@ -309,13 +309,18 @@ def main():
 
     print(f"[INFO] latest_2026.json saved. Total monitored in latest: {len(existing_latest)} vessels.")
 
-    # 6. 【修正点】蓄積された全1,221隻の有効座標から50海里圏を一括生成
+# 6. 蓄積された全隻の有効座標から50海里圏を一括生成（※main関数の中なのでスペース4個インデント）
     all_active_points = [
         (s["lat"], s["lng"])
         for s in existing_latest.values()
         if s.get("lat") is not None and s.get("lng") is not None
     ]
     update_coverage_geojson(all_active_points)
+
+
+# ★ ファイルの最末尾（左端・インデントなし）はこの2行だけにする
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
