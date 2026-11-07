@@ -8,7 +8,7 @@ import subprocess
 import sys
 import websockets
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -80,18 +80,68 @@ def get_master_data(client):
         }
     return master_map, {"total": len(master_map), "flag": flag_cnt, "ctrl": ctrl_cnt}
 
-async def collect_ais_data(target_mmsis):
+def robust_parse_timestamp(ts_str):
+    ts_str = str(ts_str).strip()
+    if not ts_str: return datetime.min
+    formats = [
+        "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
+        "%m/%d/%Y", "%Y/%m/%d", "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"
+    ]
+    clean_ts = ts_str.split(".")[0].replace(" +0000 UTC", "").replace(" UTC", "").replace("Z", "").replace("T", " ")
+    for fmt in formats:
+        try: return datetime.strptime(clean_ts, fmt)
+        except ValueError: pass
+    return datetime.min
+
+# ★ 未取得・更新遅延船舶を特定し、ピンポイントの探索Boxを生成する関数
+def generate_targeted_bboxes(master_map, existing_latest):
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    missing_or_old_ships = []
+
+    for mmsi in master_map.keys():
+        if mmsi not in existing_latest:
+            continue # まだ一度も受信していない場合（座標不明）はスキップ
+            
+        ship = existing_latest[mmsi]
+        ts_str = ship.get("timestamp", "")
+        last_time = robust_parse_timestamp(ts_str)
+        
+        # 最後に受信してから24時間以上経過している船（ロスト状態）をピックアップ
+        if (now_utc - last_time).total_seconds() > 86400:
+            lat = ship.get("lat")
+            lng = ship.get("lng")
+            if lat is not None and lng is not None:
+                missing_or_old_ships.append((lat, lng))
+    
+    targeted_bboxes = []
+    # 各ロスト船の最後に確認された位置から ±15度（広範囲）の捜索ボックスを作成
+    for lat, lng in missing_or_old_ships:
+        min_lat = max(-90, lat - 15)
+        max_lat = min(90, lat + 15)
+        min_lng = max(-180, lng - 15)
+        max_lng = min(180, lng + 15)
+        targeted_bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
+    
+    # 既存の重点エリア（アジア・中東・アフリカ）＋ 全世界フォールバック
+    base_bboxes = [
+        [[-40, -20], [35, 60]],  # アフリカ・中東
+        [[-15, 60], [30, 140]],  # 南アジア・東南アジア
+        [[-90, -180], [90, 180]] # 全世界
+    ]
+    
+    # AISStreamのリクエスト数制限を防ぐため、ターゲットBOXは最大5個までに絞る
+    final_bboxes = targeted_bboxes[:5] + base_bboxes
+    return final_bboxes
+
+async def collect_ais_data(target_mmsis, bboxes):
     received = {}
     if not AISSTREAM_API_KEY: return received
     duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
     url = "wss://stream.aisstream.io/v0/stream"
     
-    # ★ アフリカ、中東、南アジア、東南アジアのレーダー網を重点的に多重指定
-    bboxes = [
-        [[-40, -20], [35, 60]],  # アフリカ・中東エリア
-        [[-15, 60], [30, 140]],  # 南アジア・東南アジアエリア
-        [[-90, -180], [90, 180]] # 全世界（フォールバック用）
-    ]
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
 
     try:
@@ -128,7 +178,6 @@ async def collect_ais_data(target_mmsis):
     except Exception as e: print(f"[ERROR] WebSocket: {e}")
     return received
 
-# ★ 新規追加: AIS地図データ(受信実績)をSpreadsheetに直接記録する機能
 def record_coverage_to_spreadsheet(client, live_ships):
     if not client or not live_ships: return
     try:
@@ -162,22 +211,6 @@ def smooth_line(coords, iterations=2):
         smoothed.append(current[-1])
         current = smoothed
     return current
-
-def robust_parse_timestamp(ts_str):
-    ts_str = str(ts_str).strip()
-    if not ts_str: return datetime.min
-    formats = [
-        "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
-        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-        "%m/%d/%Y", "%Y/%m/%d", "%Y-%m-%d",
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"
-    ]
-    clean_ts = ts_str.split(".")[0].replace(" +0000 UTC", "").replace(" UTC", "").replace("Z", "").replace("T", " ")
-    for fmt in formats:
-        try: return datetime.strptime(clean_ts, fmt)
-        except ValueError: pass
-    return datetime.min
 
 def interpolate_sea_route(p1, p2):
     try:
@@ -337,11 +370,8 @@ def main():
     client = get_spreadsheet_client()
     if not client: return
     master_map, master_counts = get_master_data(client)
-    live_ships = asyncio.run(collect_ais_data(set(master_map.keys())))
     
-    # ★ 受信したAIS位置情報をGoogle Spreadsheetに保存
-    record_coverage_to_spreadsheet(client, live_ships)
-
+    # 既存データの読み込み
     existing_latest = {}
     if os.path.exists(LATEST_FILE):
         try:
@@ -351,6 +381,14 @@ def main():
                     if m_key and m_key in master_map:
                         existing_latest[m_key] = s
         except Exception: pass
+
+    # ★ 拾えていない船を特定し、ターゲット探索Boxを生成
+    bboxes = generate_targeted_bboxes(master_map, existing_latest)
+
+    # データ収集（ターゲティングBoxを指定）
+    live_ships = asyncio.run(collect_ais_data(set(master_map.keys()), bboxes))
+    
+    record_coverage_to_spreadsheet(client, live_ships)
 
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
