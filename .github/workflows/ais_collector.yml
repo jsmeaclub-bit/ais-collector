@@ -2,17 +2,14 @@ name: ais_collector
 
 on:
   schedule:
-    # 30分間隔で実行（GitHubサーバーの混雑集中を避けるため毎時12分と42分に実行）
     - cron: '12,42 * * * *'
-    # ※ 1時間間隔（毎時1回）に抑えたい場合は上記をコメントアウトし、下記を有効化してください
-    # - cron: '15 * * * *'
-  workflow_dispatch: # Actions画面からの手動実行ボタン
+  workflow_dispatch:
 
 jobs:
   collect-and-update:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 収集データの自動pushに必要な書き込み権限
+      contents: write
 
     steps:
       - name: Checkout code
@@ -26,11 +23,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install searoute shapely scipy numpy websockets requests
+          pip install searoute shapely scipy numpy websockets requests gspread google-auth
 
       - name: Run AIS Collector and Route Builder
         env:
-          GAS_WEBHOOK_URL: ${{ secrets.GAS_WEBHOOK_URL }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           AISSTREAM_API_KEY: ${{ secrets.AISSTREAM_API_KEY }}
         run: |
           python main.py
@@ -40,7 +38,6 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          # 差分がある場合のみコミット＆プッシュを実行
           if git diff --staged --quiet; then
             echo "No changes detected in data directory."
           else
