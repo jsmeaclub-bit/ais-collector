@@ -85,7 +85,14 @@ async def collect_ais_data(target_mmsis):
     if not AISSTREAM_API_KEY: return received
     duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
     url = "wss://stream.aisstream.io/v0/stream"
-    sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": [[[-90, -180], [90, 180]]], "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
+    
+    # ★ アフリカ、中東、南アジア、東南アジアのレーダー網を重点的に多重指定
+    bboxes = [
+        [[-40, -20], [35, 60]],  # アフリカ・中東エリア
+        [[-15, 60], [30, 140]],  # 南アジア・東南アジアエリア
+        [[-90, -180], [90, 180]] # 全世界（フォールバック用）
+    ]
+    sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
 
     try:
         async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
@@ -120,6 +127,28 @@ async def collect_ais_data(target_mmsis):
                 except Exception: continue
     except Exception as e: print(f"[ERROR] WebSocket: {e}")
     return received
+
+# ★ 新規追加: AIS地図データ(受信実績)をSpreadsheetに直接記録する機能
+def record_coverage_to_spreadsheet(client, live_ships):
+    if not client or not live_ships: return
+    try:
+        wb = client.open_by_key(SPREADSHEET_ID)
+        try:
+            ws_cov = wb.worksheet("AIS_Coverage_History")
+        except:
+            ws_cov = wb.add_worksheet("AIS_Coverage_History", 1000, 10)
+            ws_cov.append_row(["Timestamp", "MMSI", "Name", "Latitude", "Longitude", "Speed"])
+        
+        rows = []
+        now_str = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+        for mmsi, ship in live_ships.items():
+            if ship["lat"] is not None and ship["lng"] is not None:
+                rows.append([now_str, mmsi, ship["name"], ship["lat"], ship["lng"], ship["speed"]])
+        
+        if rows:
+            ws_cov.append_rows(rows)
+    except Exception as e:
+        print(f"Failed to record coverage to spreadsheet: {e}")
 
 def smooth_line(coords, iterations=2):
     if len(coords) < 3: return coords
@@ -253,7 +282,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             heading = calculate_bearing(p_prev, p_last)
             calculated_headings[mmsi] = heading
 
-        # ★★★ 平滑化後の実際のセグメント数を元に【最初=0.15、最新船尾=0.95】を厳密計算 ★★★
         smoothed_sub_lines = []
         for sub in sub_lines:
             if len(sub) > 200:
@@ -273,7 +301,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             for smoothed in smoothed_sub_lines:
                 for i in range(len(smoothed) - 1):
                     p1, p2 = smoothed[i], smoothed[i+1]
-                    # 最初（最古）が 0.0 -> 0.15（薄い）、最後（最新位置）が 1.0 -> 0.95（最も濃くはっきり）
                     ratio = current_seg_idx / max(1, total_segments - 1)
                     opacity = round(0.15 + (0.80 * ratio), 2)
                     
@@ -312,6 +339,9 @@ def main():
     master_map, master_counts = get_master_data(client)
     live_ships = asyncio.run(collect_ais_data(set(master_map.keys())))
     
+    # ★ 受信したAIS位置情報をGoogle Spreadsheetに保存
+    record_coverage_to_spreadsheet(client, live_ships)
+
     existing_latest = {}
     if os.path.exists(LATEST_FILE):
         try:
