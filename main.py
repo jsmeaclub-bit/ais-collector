@@ -2,7 +2,6 @@ import os
 import json
 import time
 import math
-import random
 import asyncio
 import subprocess
 import sys
@@ -63,7 +62,7 @@ def get_master_data(client):
     records = sheet.get_all_records()
     master_map = {}
     flag_cnt, ctrl_cnt = 0, 0
-    type_counts_dict = defaultdict(int) # ★追加：船種ごとの集計用
+    type_counts_dict = defaultdict(int) 
     
     for r in records:
         mmsi = str(r.get("MMSI", "")).strip().split(".")[0]
@@ -79,7 +78,7 @@ def get_master_data(client):
         
         ship_type = str(r.get("Ship Type", "-")).strip()
         if not ship_type: ship_type = "-"
-        type_counts_dict[ship_type] += 1 # ★追加：船種をカウント
+        type_counts_dict[ship_type] += 1 
         
         master_map[mmsi] = {
             "mmsi": mmsi,
@@ -94,7 +93,6 @@ def get_master_data(client):
             "survey": str(r.get("Special Survey", "-")).strip()
         }
         
-    # ★追加：集計結果を多い順（降順）にソートしてリスト化
     sorted_types = sorted(type_counts_dict.items(), key=lambda x: x[1], reverse=True)
     type_counts_list = [{"type": k, "count": v} for k, v in sorted_types]
     
@@ -128,69 +126,108 @@ def generate_targeted_bboxes(master_map, existing_latest):
         ts_str = ship.get("timestamp", "")
         last_time = robust_parse_timestamp(ts_str)
         
-        if (now_utc - last_time).total_seconds() > 86400:
+        hours_offline = (now_utc - last_time).total_seconds() / 3600.0
+        
+        # 24時間以上更新がない船を「行方不明」としてターゲット化
+        if hours_offline > 24:
             lat = ship.get("lat")
             lng = ship.get("lng")
             if lat is not None and lng is not None:
-                missing_or_old_ships.append((lat, lng))
+                # ★改善：行方不明時間が長いほど、捜索エリアを自動で広げる（最大20度＝約2000km四方）
+                expansion = min(20.0, hours_offline * 0.35) # 1時間に約0.35度(約20ノット)移動すると仮定
+                missing_or_old_ships.append((lat, lng, expansion))
     
     targeted_bboxes = []
-    for lat, lng in missing_or_old_ships:
-        min_lat = max(-90, lat - 15)
-        max_lat = min(90, lat + 15)
-        min_lng = max(-180, lng - 15)
-        max_lng = min(180, lng + 15)
+    # 行方不明時間が長い（捜索エリアが広い）順に優先してBBoxを作成
+    missing_or_old_ships.sort(key=lambda x: x[2], reverse=True)
+    
+    for lat, lng, exp in missing_or_old_ships:
+        min_lat = max(-90, lat - exp - 2)
+        max_lat = min(90, lat + exp + 2)
+        min_lng = max(-180, lng - exp - 2)
+        max_lng = min(180, lng + exp + 2)
         targeted_bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
     
+    # ターゲットは最大5件まで。残りは世界の主要チョークポイントと全世界を指定
     base_bboxes = [
-        [[-40, -20], [35, 60]],  
-        [[-15, 60], [30, 140]],  
-        [[-90, -180], [90, 180]] 
+        [[-40, -20], [35, 60]],  # アフリカ・欧州
+        [[-15, 60], [30, 140]],  # アジア・インド洋
+        [[-90, -180], [90, 180]] # 全世界（フォールバック）
     ]
     
     final_bboxes = targeted_bboxes[:5] + base_bboxes
     return final_bboxes
 
+# ★改善：受信データの解読をバックグラウンドで行うワーカー関数（バケツリレーの受け手）
+async def process_message_queue(queue, target_mmsis, received):
+    while True:
+        msg = await queue.get()
+        try:
+            data = json.loads(msg)
+            mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
+            
+            # 対象船のデータだけを処理（それ以外は即座に破棄してメモリとCPUを節約）
+            if mmsi in target_mmsis:
+                if mmsi not in received:
+                    received[mmsi] = {
+                        "mmsi": mmsi, "lat": None, "lng": None, "speed": 0.0, "heading": 0.0,
+                        "name": data.get("MetaData", {}).get("ShipName", "").strip(),
+                        "destination": "", "eta": "", "timestamp": data.get("MetaData", {}).get("time_utc")
+                    }
+                
+                msg_type = data.get("MessageType")
+                if msg_type == "PositionReport":
+                    pos = data.get("Message", {}).get("PositionReport", {})
+                    received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
+                    received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
+                    received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
+                elif msg_type == "ShipStaticData":
+                    static = data.get("Message", {}).get("ShipStaticData", {})
+                    if dest := static.get("Destination", "").strip():
+                        received[mmsi]["destination"] = dest
+                    eta = static.get("Eta", {})
+                    if eta and eta.get("Month"):
+                        received[mmsi]["eta"] = f"{eta.get('Month'):02d}-{eta.get('Day'):02d} {eta.get('Hour'):02d}:{eta.get('Minute'):02d}"
+        except Exception:
+            pass
+        finally:
+            queue.task_done()
+
 async def collect_ais_data(target_mmsis, bboxes):
     received = {}
     if not AISSTREAM_API_KEY: return received
-    duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
+    
+    # ★改善：実行時間を「確定で6分（360秒）」に設定。停泊船やStatic Dataの送信周期（3〜6分）を確実に網羅する
+    duration = 360 if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 60
     url = "wss://stream.aisstream.io/v0/stream"
     
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
 
+    # ★改善：濁流データをパケットロスなく受け止めるためのキュー（バケツ）を用意
+    queue = asyncio.Queue()
+    # ワーカーを起動
+    consumer_task = asyncio.create_task(process_message_queue(queue, target_mmsis, received))
+
     try:
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        async with websockets.connect(url, ping_interval=20, ping_timeout=20, max_size=None) as ws:
             await ws.send(json.dumps(sub_msg))
             start = time.time()
             while time.time() - start < duration:
                 try:
+                    # データを受信したら、解読せずに即座にキュー（バケツ）に放り込む。これで受信口が絶対に詰まらない
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                    data = json.loads(msg)
-                    mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
-                    if mmsi not in target_mmsis: continue
-                    
-                    if mmsi not in received:
-                        received[mmsi] = {
-                            "mmsi": mmsi, "lat": None, "lng": None, "speed": 0.0, "heading": 0.0,
-                            "name": data.get("MetaData", {}).get("ShipName", "").strip(),
-                            "destination": "", "eta": "", "timestamp": data.get("MetaData", {}).get("time_utc")
-                        }
-                    
-                    if data.get("MessageType") == "PositionReport":
-                        pos = data.get("Message", {}).get("PositionReport", {})
-                        received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
-                        received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
-                        received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
-                    elif data.get("MessageType") == "ShipStaticData":
-                        static = data.get("Message", {}).get("ShipStaticData", {})
-                        if dest := static.get("Destination", "").strip():
-                            received[mmsi]["destination"] = dest
-                        eta = static.get("Eta", {})
-                        if eta and eta.get("Month"):
-                            received[mmsi]["eta"] = f"{eta.get('Month'):02d}-{eta.get('Day'):02d} {eta.get('Hour'):02d}:{eta.get('Minute'):02d}"
-                except Exception: continue
-    except Exception as e: print(f"[ERROR] WebSocket: {e}")
+                    await queue.put(msg)
+                except asyncio.TimeoutError:
+                    continue
+                except websockets.ConnectionClosed:
+                    break
+    except Exception as e: 
+        print(f"[ERROR] WebSocket connection: {e}")
+        
+    # 受信終了後、キューに残っているデータがすべて処理されるのを待つ
+    await queue.join()
+    consumer_task.cancel()
+    
     return received
 
 def smooth_line(coords, iterations=2):
