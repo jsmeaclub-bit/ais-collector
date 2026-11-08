@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ★ shapely ライブラリも自動インストールするように追加
 try:
     import searoute as sr
     from shapely.geometry import Point, mapping
@@ -33,11 +32,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 CURRENT_YEAR = datetime.now(timezone.utc).year
 LATEST_FILE = os.path.join(DATA_DIR, f"latest_{CURRENT_YEAR}.json")
 ROUTES_FILE = os.path.join(DATA_DIR, f"routes_{CURRENT_YEAR}.json")
-
-# ★ カバーエリア用のファイルパス定義を追加
 COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
-EXPIRATION_SECONDS = 180 * 24 * 3600  # 180日（半年）
+EXPIRATION_SECONDS = 180 * 24 * 3600  
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
@@ -358,8 +355,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     return calculated_headings
 
-# ★ 船の位置からカバーエリアマップを更新する機能
-def update_coverage_from_live_ships(live_ships):
+def update_coverage_from_all_latest(existing_latest):
     current_time = time.time()
     six_months_ago = current_time - EXPIRATION_SECONDS
 
@@ -376,25 +372,25 @@ def update_coverage_from_live_ships(live_ships):
         except Exception:
             pass
 
-    # 今回受信できた船の座標をカバーエリアとして追加（小数点2桁＝約1km四方に丸める）
-    for mmsi, ship in live_ships.items():
+    # ★ 画面上に残っている「すべての船（ゴースト含む）」をカバーエリアに登録する
+    for mmsi, ship in existing_latest.items():
         lat = ship.get("lat")
         lng = ship.get("lng")
         if lat is not None and lng is not None:
-            existing_points_dict[(round(lat, 2), round(lng, 2))] = current_time
+            ts_str = ship.get("timestamp", "")
+            dt = robust_parse_timestamp(ts_str)
+            ts = dt.replace(tzinfo=timezone.utc).timestamp() if dt != datetime.min else current_time
+            existing_points_dict[(round(float(lat), 2), round(float(lng), 2))] = ts
 
-    # 期限切れを削除
     active_points = {}
     for coords, ts in existing_points_dict.items():
         if ts >= six_months_ago:
             active_points[coords] = ts
 
-    # ポイント保存
     merged_points = [[k[0], k[1], v] for k, v in active_points.items()]
     with open(COVERAGE_POINTS_FILE, "w", encoding="utf-8") as f:
         json.dump(merged_points, f, ensure_ascii=False)
 
-    # GeoJSONとして保存（半径20海里 = 0.33度）
     if active_points:
         BUFFER_DEG = 0.33
         circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in active_points.keys()]
@@ -416,7 +412,6 @@ def update_coverage_from_live_ships(live_ships):
         with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(coverage_geojson, f, ensure_ascii=False)
 
-
 def main():
     client = get_spreadsheet_client()
     if not client: return
@@ -434,12 +429,7 @@ def main():
 
     bboxes = generate_targeted_bboxes(master_map, existing_latest)
 
-    # 電波から船の位置を受信
     live_ships = asyncio.run(collect_ais_data(set(master_map.keys()), bboxes))
-    
-    # ★ 受信できた座標を使って緑色マップを同時に更新
-    if live_ships:
-        update_coverage_from_live_ships(live_ships)
 
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
@@ -477,6 +467,9 @@ def main():
             if ship_data.get("owner") in ("-", "", None): ship_data["owner"] = m["owner"]
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
+
+    # ★ 画面上の全船舶（最新・過去問わず）の座標を使って緑マップを更新
+    update_coverage_from_all_latest(existing_latest)
 
     update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
 
