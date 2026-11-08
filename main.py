@@ -239,7 +239,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     routes_output = []
     calculated_headings = {}
-    grid_counts = defaultdict(int)
+    
+    # ★ バグ修正：グリッドごとの「MMSI（船のID）」のユニークな集合を記録するように変更
+    grid_mmsi_map = defaultdict(set)
     GRID_SIZE = 0.08
 
     for mmsi, data_list in tracks_map.items():
@@ -320,7 +322,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     mid_lat = (p1[0] + p2[0]) / 2.0
                     mid_lng = (p1[1] + p2[1]) / 2.0
                     g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
-                    grid_counts[g_key] += 1
+                    
+                    # ★ 船（MMSI）をグリッドに記録（セグメント数ではなく船の数をカウントするため）
+                    grid_mmsi_map[g_key].add(mmsi)
 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
                     current_seg_idx += 1
@@ -333,10 +337,11 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
+    # ★ 船の数（ユニークなMMSIの数）をセグメントの count として埋め込む
     for r in routes_output:
         for seg in r["segments"]:
             g_key = seg.pop("g_key", None)
-            seg["count"] = grid_counts.get(g_key, 1)
+            seg["count"] = len(grid_mmsi_map.get(g_key, set()))
 
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, 0.0)
