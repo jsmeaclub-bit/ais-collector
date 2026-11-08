@@ -2,7 +2,113 @@
   "masterCounts": {
     "total": 2612,
     "flag": 699,
-    "ctrl": 1913
+    "ctrl": 1913,
+    "type_counts": [
+      {
+        "type": "Bulk Carrier",
+        "count": 1037
+      },
+      {
+        "type": "Vehicles Carrier",
+        "count": 359
+      },
+      {
+        "type": "Chemical/Products Tanker",
+        "count": 193
+      },
+      {
+        "type": "General Cargo Ship",
+        "count": 179
+      },
+      {
+        "type": "Products Tanker",
+        "count": 122
+      },
+      {
+        "type": "LPG Tanker",
+        "count": 111
+      },
+      {
+        "type": "LNG Tanker",
+        "count": 95
+      },
+      {
+        "type": "Wood Chips Carrier",
+        "count": 79
+      },
+      {
+        "type": "Ro-Ro Cargo Ship",
+        "count": 74
+      },
+      {
+        "type": "Crude Oil Tanker",
+        "count": 70
+      },
+      {
+        "type": "Cement Carrier",
+        "count": 69
+      },
+      {
+        "type": "General Cargo Ship (Open Hatch)",
+        "count": 55
+      },
+      {
+        "type": "Ore Carrier",
+        "count": 54
+      },
+      {
+        "type": "Container Ship (Fully Cellular)",
+        "count": 37
+      },
+      {
+        "type": "Limestone Carrier",
+        "count": 24
+      },
+      {
+        "type": "General Cargo Ship (with Ro-Ro facility)",
+        "count": 18
+      },
+      {
+        "type": "Molten Sulphur Tanker",
+        "count": 11
+      },
+      {
+        "type": "Bulk Carrier, Self-discharging",
+        "count": 5
+      },
+      {
+        "type": "Chemical Tanker",
+        "count": 5
+      },
+      {
+        "type": "Asphalt/Bitumen Tanker",
+        "count": 4
+      },
+      {
+        "type": "Crude/Oil Products Tanker",
+        "count": 3
+      },
+      {
+        "type": "Aggregates Carrier",
+        "count": 2
+      },
+      {
+        "type": "Palletised Cargo Ship",
+        "count": 2
+      },
+      {
+        "type": "Bulk/Sulphuric Acid Carrier",
+        "count": 2
+      },
+      {
+        "type": "Powder Carrier",
+        "count": 1
+      },
+      {
+        "type": "Deck Cargo Ship",
+        "count": 1
+      }
+    ]
   },
   "latest": [
     {
@@ -567,13 +673,13 @@
       "owner": "Galaxy Shipping Navigation SA",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20300809",
-      "lat": -23.832506666666667,
-      "lng": 151.51451166666666,
-      "speed": 0.5,
-      "heading": 3.5,
+      "lat": -23.83314,
+      "lng": 151.51397666666665,
+      "speed": 0.2,
+      "heading": 217.3,
       "destination": "AU GLT",
       "eta": "10-21 01:00",
-      "timestamp": "2026-11-08 13:29:37.138409403 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:37.021695157 +0000 UTC"
     },
     {
       "mmsi": "352002170",
@@ -738,13 +844,13 @@
       "owner": "Maple LNG Transport Inc",
       "operator": "Hiroshima Gas Co Ltd",
       "survey": "20271108",
-      "lat": 46.474619999999994,
-      "lng": 142.92443666666668,
-      "speed": 1,
-      "heading": 134.7,
+      "lat": 46.47266166666667,
+      "lng": 142.92833166666665,
+      "speed": 1.2,
+      "heading": 125.3,
       "destination": "RU PGN",
       "eta": "11-10 04:00",
-      "timestamp": "2026-11-08 14:20:29.592492885 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:49.962450493 +0000 UTC"
     },
     {
       "mmsi": "538011841",
@@ -1637,7 +1743,7 @@
       "heading": 90.0,
       "destination": "NZ TRG",
       "eta": "11-04 15:30",
-      "timestamp": "2026-11-08 13:29:37.103019235 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:37.04421902 +0000 UTC"
     },
     {
       "mmsi": "356334000",
@@ -3759,13 +3865,13 @@
       "owner": "Nissen Kaiun/Southern Route",
       "operator": "Nissen Kaiun Co Ltd",
       "survey": "20280219",
-      "lat": -24.089548333333333,
-      "lng": -46.178335,
-      "speed": 0.3,
-      "heading": 0.0,
+      "lat": -24.089395000000003,
+      "lng": -46.178685,
+      "speed": 0,
+      "heading": 285.3,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-08 14:23:31.246020594 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:28.873283008 +0000 UTC"
     },
     {
       "mmsi": "538010971",
@@ -6837,13 +6943,13 @@
       "owner": "Grace Hawk/Eiko Kisen Co Ltd",
       "operator": "Eiko Kisen Co Ltd",
       "survey": "20300423",
-      "lat": -23.977163333333333,
-      "lng": -46.29136166666667,
-      "speed": 0,
+      "lat": null,
+      "lng": null,
+      "speed": 0.0,
       "heading": 180.0,
       "destination": "BR_SSZ",
       "eta": "11-05 23:00",
-      "timestamp": "2026-11-08 14:23:35.910399805 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:36.196469725 +0000 UTC"
     },
     {
       "mmsi": "352003863",
@@ -7635,13 +7741,13 @@
       "owner": "Chitose Shipping & Japan Rlwy",
       "operator": "Chitose Shipping Co Ltd",
       "survey": "20281126",
-      "lat": 33.56711666666667,
-      "lng": 136.035225,
-      "speed": 15.1,
-      "heading": 26.9,
+      "lat": 33.52774333333333,
+      "lng": 135.9852,
+      "speed": 14.6,
+      "heading": 226.6,
       "destination": ">JP SBK COSMO 42BH",
       "eta": "11-08 23:00",
-      "timestamp": "2026-11-08 14:21:45.189746899 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:28.069838028 +0000 UTC"
     },
     {
       "mmsi": "431100922",
@@ -7996,13 +8102,13 @@
       "owner": "DT Chemical SA",
       "operator": "Daiichi Tanker Co Ltd",
       "survey": "20280429",
-      "lat": null,
-      "lng": null,
-      "speed": 0.0,
-      "heading": 322.5,
+      "lat": 52.185536666666664,
+      "lng": 4.214143333333333,
+      "speed": 0,
+      "heading": 270.0,
       "destination": "NL SCE",
       "eta": "10-26 13:45",
-      "timestamp": "2026-11-08 14:21:30.154901768 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:46.822197278 +0000 UTC"
     },
     {
       "mmsi": "636011280",
@@ -8794,13 +8900,13 @@
       "owner": "Primavera Montana SA",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20310224",
-      "lat": -23.650255,
-      "lng": -70.40760166666668,
+      "lat": -23.650303333333333,
+      "lng": -70.40761333333333,
       "speed": 0,
       "heading": 0.0,
       "destination": "PEMRI > CLANF",
       "eta": "10-31 11:00",
-      "timestamp": "2026-11-08 08:59:30.20579785 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:30.226733406 +0000 UTC"
     },
     {
       "mmsi": "431014492",
@@ -8870,13 +8976,13 @@
       "owner": "Stevens Line Co Ltd",
       "operator": "Sato Steamship Co Ltd",
       "survey": "20300511",
-      "lat": -29.729308333333332,
-      "lng": 31.402911666666668,
-      "speed": 0.9,
-      "heading": 36.7,
+      "lat": -29.725945000000003,
+      "lng": 31.406128333333335,
+      "speed": 1.3,
+      "heading": 39.3,
       "destination": "ZADUR",
       "eta": "11-07 09:00",
-      "timestamp": "2026-11-08 14:21:09.721085015 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:39.53575752 +0000 UTC"
     },
     {
       "mmsi": "431020295",
@@ -9440,13 +9546,13 @@
       "owner": "Japan Ship Management Co Ltd",
       "operator": "Japan Ship Management Co Ltd",
       "survey": "20270131",
-      "lat": 48.35565,
-      "lng": -123.39117,
+      "lat": 48.36603,
+      "lng": -123.37168333333334,
       "speed": 10.1,
-      "heading": 25.2,
+      "heading": 133.1,
       "destination": "CA RTB",
       "eta": "11-06 21:00",
-      "timestamp": "2026-11-08 14:19:35.590976472 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:35.431589101 +0000 UTC"
     },
     {
       "mmsi": "351653000",
@@ -12803,13 +12909,13 @@
       "owner": "Tiantong Shipping Ltd",
       "operator": "Grampus Marine Co Ltd",
       "survey": "20270222",
-      "lat": 33.73716666666667,
-      "lng": 136.41171,
+      "lat": 33.71882,
+      "lng": 136.39148,
       "speed": 8.9,
-      "heading": 0.0,
+      "heading": 222.4,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-08 14:25:41.747206775 +0000 UTC"
+      "timestamp": "2026-11-08 14:35:42.391337118 +0000 UTC"
     },
     {
       "mmsi": "431100363",
