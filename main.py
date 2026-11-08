@@ -8,7 +8,7 @@ import subprocess
 import sys
 import websockets
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -24,8 +24,10 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-LATEST_FILE = os.path.join(DATA_DIR, "latest_2026.json")
-ROUTES_FILE = os.path.join(DATA_DIR, "routes_2026.json")
+
+CURRENT_YEAR = datetime.now(timezone.utc).year
+LATEST_FILE = os.path.join(DATA_DIR, f"latest_{CURRENT_YEAR}.json")
+ROUTES_FILE = os.path.join(DATA_DIR, f"routes_{CURRENT_YEAR}.json")
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
@@ -96,20 +98,18 @@ def robust_parse_timestamp(ts_str):
         except ValueError: pass
     return datetime.min
 
-# ★ 未取得・更新遅延船舶を特定し、ピンポイントの探索Boxを生成する関数
 def generate_targeted_bboxes(master_map, existing_latest):
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     missing_or_old_ships = []
 
     for mmsi in master_map.keys():
         if mmsi not in existing_latest:
-            continue # まだ一度も受信していない場合（座標不明）はスキップ
+            continue 
             
         ship = existing_latest[mmsi]
         ts_str = ship.get("timestamp", "")
         last_time = robust_parse_timestamp(ts_str)
         
-        # 最後に受信してから24時間以上経過している船（ロスト状態）をピックアップ
         if (now_utc - last_time).total_seconds() > 86400:
             lat = ship.get("lat")
             lng = ship.get("lng")
@@ -117,7 +117,6 @@ def generate_targeted_bboxes(master_map, existing_latest):
                 missing_or_old_ships.append((lat, lng))
     
     targeted_bboxes = []
-    # 各ロスト船の最後に確認された位置から ±15度（広範囲）の捜索ボックスを作成
     for lat, lng in missing_or_old_ships:
         min_lat = max(-90, lat - 15)
         max_lat = min(90, lat + 15)
@@ -125,14 +124,12 @@ def generate_targeted_bboxes(master_map, existing_latest):
         max_lng = min(180, lng + 15)
         targeted_bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
     
-    # 既存の重点エリア（アジア・中東・アフリカ）＋ 全世界フォールバック
     base_bboxes = [
-        [[-40, -20], [35, 60]],  # アフリカ・中東
-        [[-15, 60], [30, 140]],  # 南アジア・東南アジア
-        [[-90, -180], [90, 180]] # 全世界
+        [[-40, -20], [35, 60]],  
+        [[-15, 60], [30, 140]],  
+        [[-90, -180], [90, 180]] 
     ]
     
-    # AISStreamのリクエスト数制限を防ぐため、ターゲットBOXは最大5個までに絞る
     final_bboxes = targeted_bboxes[:5] + base_bboxes
     return final_bboxes
 
@@ -178,27 +175,6 @@ async def collect_ais_data(target_mmsis, bboxes):
     except Exception as e: print(f"[ERROR] WebSocket: {e}")
     return received
 
-def record_coverage_to_spreadsheet(client, live_ships):
-    if not client or not live_ships: return
-    try:
-        wb = client.open_by_key(SPREADSHEET_ID)
-        try:
-            ws_cov = wb.worksheet("AIS_Coverage_History")
-        except:
-            ws_cov = wb.add_worksheet("AIS_Coverage_History", 1000, 10)
-            ws_cov.append_row(["Timestamp", "MMSI", "Name", "Latitude", "Longitude", "Speed"])
-        
-        rows = []
-        now_str = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
-        for mmsi, ship in live_ships.items():
-            if ship["lat"] is not None and ship["lng"] is not None:
-                rows.append([now_str, mmsi, ship["name"], ship["lat"], ship["lng"], ship["speed"]])
-        
-        if rows:
-            ws_cov.append_rows(rows)
-    except Exception as e:
-        print(f"Failed to record coverage to spreadsheet: {e}")
-
 def smooth_line(coords, iterations=2):
     if len(coords) < 3: return coords
     current = coords
@@ -225,8 +201,12 @@ def interpolate_sea_route(p1, p2):
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, client):
     wb = client.open_by_key(SPREADSHEET_ID)
-    try: ws_history = wb.worksheet("Traffic_History_2026")
-    except: ws_history = wb.add_worksheet("Traffic_History_2026", 1000, 15)
+    
+    sheet_name = f"Traffic_History_{CURRENT_YEAR}"
+    try: ws_history = wb.worksheet(sheet_name)
+    except: 
+        ws_history = wb.add_worksheet(sheet_name, 1000, 15)
+        ws_history.append_row(["Timestamp", "MMSI", "Name", "Lat", "Lng", "Speed", "Category", "Owner", "Type", "IMO", "Survey"])
     
     new_history_rows = []
     for mmsi, ship in live_ships.items():
@@ -371,7 +351,6 @@ def main():
     if not client: return
     master_map, master_counts = get_master_data(client)
     
-    # 既存データの読み込み
     existing_latest = {}
     if os.path.exists(LATEST_FILE):
         try:
@@ -382,14 +361,10 @@ def main():
                         existing_latest[m_key] = s
         except Exception: pass
 
-    # ★ 拾えていない船を特定し、ターゲット探索Boxを生成
     bboxes = generate_targeted_bboxes(master_map, existing_latest)
 
-    # データ収集（ターゲティングBoxを指定）
     live_ships = asyncio.run(collect_ais_data(set(master_map.keys()), bboxes))
     
-    record_coverage_to_spreadsheet(client, live_ships)
-
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
         m_info = master_map.get(mmsi, {})
