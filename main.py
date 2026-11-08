@@ -1,13 +1,27 @@
 import os
 import json
 import time
+import math
+import random
 import asyncio
+import subprocess
+import sys
 import websockets
+from collections import defaultdict
 from datetime import datetime, timezone
-from shapely.geometry import Point, mapping
-from shapely.ops import unary_union
 import gspread
 from google.oauth2.service_account import Credentials
+
+# ★ shapely ライブラリも自動インストールするように追加
+try:
+    import searoute as sr
+    from shapely.geometry import Point, mapping
+    from shapely.ops import unary_union
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
+    import searoute as sr
+    from shapely.geometry import Point, mapping
+    from shapely.ops import unary_union
 
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
@@ -15,193 +29,459 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
-POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
-CURRENT_YEAR = datetime.now(timezone.utc).year
-COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 
-LISTEN_DURATION = 300  
-# 基地局の有効期限を180日（半年）に設定
-EXPIRATION_SECONDS = 180 * 24 * 3600  
+CURRENT_YEAR = datetime.now(timezone.utc).year
+LATEST_FILE = os.path.join(DATA_DIR, f"latest_{CURRENT_YEAR}.json")
+ROUTES_FILE = os.path.join(DATA_DIR, f"routes_{CURRENT_YEAR}.json")
+
+# ★ カバーエリア用のファイルパス定義を追加
+COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
+COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
+EXPIRATION_SECONDS = 180 * 24 * 3600  # 180日（半年）
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
+    sa_info = json.loads(GCP_SA_KEY)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    return gspread.authorize(Credentials.from_service_account_info(sa_info, scopes=scopes))
+
+def parse_gt(gt_val):
     try:
-        sa_info = json.loads(GCP_SA_KEY)
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        return gspread.authorize(Credentials.from_service_account_info(sa_info, scopes=scopes))
-    except Exception as e:
-        print(f"Error authenticating to Google Sheets: {e}")
-        return None
+        clean = str(gt_val).replace(",", "").strip()
+        return float(clean)
+    except:
+        return 0.0
 
-def get_under_covered_bboxes(points, grid_size=30, max_boxes=12):
-    grid_counts = {}
-    lat_steps = int(180 / grid_size)
-    lng_steps = int(360 / grid_size)
-    
-    for i in range(lat_steps):
-        for j in range(lng_steps):
-            grid_counts[(i, j)] = 0
+def calculate_bearing(p1, p2):
+    lat1 = math.radians(p1[0])
+    lat2 = math.radians(p2[0])
+    diff_long = math.radians(p2[1] - p1[1])
+    x = math.sin(diff_long) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(diff_long))
+    initial_bearing = math.degrees(math.atan2(x, y))
+    return round((initial_bearing + 360) % 360, 1)
+
+def get_master_data(client):
+    sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Japan_Master")
+    records = sheet.get_all_records()
+    master_map = {}
+    flag_cnt, ctrl_cnt = 0, 0
+    for r in records:
+        mmsi = str(r.get("MMSI", "")).strip().split(".")[0]
+        if not mmsi or mmsi in ("nan", "None", "0"): continue
+        
+        gt_num = parse_gt(r.get("GT", 0))
+        if gt_num > 0 and gt_num < 2000:
+            continue
             
-    for pt in points:
-        lat, lng = pt[0], pt[1]
-        lat = max(-90, min(89.9999, lat))
-        lng = max(-180, min(179.9999, lng))
+        cat = str(r.get("Category", "日本船社運航船")).strip()
+        if cat == "日本籍船": flag_cnt += 1
+        else: ctrl_cnt += 1
         
-        i = int((lat + 90) / grid_size)
-        j = int((lng + 180) / grid_size)
-        grid_counts[(i, j)] += 1
-        
-    sorted_grids = sorted(grid_counts.items(), key=lambda x: x[1])
-    
-    bboxes = []
-    for (i, j), count in sorted_grids[:max_boxes]:
-        min_lat = -90 + i * grid_size
-        max_lat = min_lat + grid_size
-        min_lng = -180 + j * grid_size
-        max_lng = min_lng + grid_size
-        bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
-        
-    bboxes.append([[-60, 40], [-20, 100]])
-    bboxes.append([[-60, -160], [-20, -80]])
-    bboxes.append([[-40, -40], [10, 20]])
-    
-    return bboxes
+        master_map[mmsi] = {
+            "mmsi": mmsi,
+            "name": str(r.get("Name of Ship", "")).strip(),
+            "imo": str(r.get("IMO/LR/IHS No.", "-")).strip(),
+            "category": cat,
+            "flag": str(r.get("Flag", "-")).strip(),
+            "type": str(r.get("Ship Type", "-")).strip(),
+            "gt": str(r.get("GT", "-")).strip(),
+            "owner": str(r.get("Registered Owner", "-")).strip(),
+            "operator": str(r.get("Operator", "-")).strip(),
+            "survey": str(r.get("Special Survey", "-")).strip()
+        }
+    return master_map, {"total": len(master_map), "flag": flag_cnt, "ctrl": ctrl_cnt}
 
-async def collect_coverage_data(bboxes):
-    collected_points = []
-    if not AISSTREAM_API_KEY:
-        print("[ERROR] AISSTREAM_API_KEY is not set.")
-        return collected_points
+def robust_parse_timestamp(ts_str):
+    ts_str = str(ts_str).strip()
+    if not ts_str: return datetime.min
+    formats = [
+        "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
+        "%m/%d/%Y", "%Y/%m/%d", "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"
+    ]
+    clean_ts = ts_str.split(".")[0].replace(" +0000 UTC", "").replace(" UTC", "").replace("Z", "").replace("T", " ")
+    for fmt in formats:
+        try: return datetime.strptime(clean_ts, fmt)
+        except ValueError: pass
+    return datetime.min
+
+def generate_targeted_bboxes(master_map, existing_latest):
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    missing_or_old_ships = []
+
+    for mmsi in master_map.keys():
+        if mmsi not in existing_latest:
+            continue 
+            
+        ship = existing_latest[mmsi]
+        ts_str = ship.get("timestamp", "")
+        last_time = robust_parse_timestamp(ts_str)
         
+        if (now_utc - last_time).total_seconds() > 86400:
+            lat = ship.get("lat")
+            lng = ship.get("lng")
+            if lat is not None and lng is not None:
+                missing_or_old_ships.append((lat, lng))
+    
+    targeted_bboxes = []
+    for lat, lng in missing_or_old_ships:
+        min_lat = max(-90, lat - 15)
+        max_lat = min(90, lat + 15)
+        min_lng = max(-180, lng - 15)
+        max_lng = min(180, lng + 15)
+        targeted_bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
+    
+    base_bboxes = [
+        [[-40, -20], [35, 60]],  
+        [[-15, 60], [30, 140]],  
+        [[-90, -180], [90, 180]] 
+    ]
+    
+    final_bboxes = targeted_bboxes[:5] + base_bboxes
+    return final_bboxes
+
+async def collect_ais_data(target_mmsis, bboxes):
+    received = {}
+    if not AISSTREAM_API_KEY: return received
+    duration = random.randint(120, 600) if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
     url = "wss://stream.aisstream.io/v0/stream"
-    sub_msg = {
-        "APIKey": AISSTREAM_API_KEY, 
-        "BoundingBoxes": bboxes, 
-        "FilterMessageTypes": ["PositionReport"]
-    }
+    
+    sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
 
     try:
         async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
             await ws.send(json.dumps(sub_msg))
-            print(f"Connected. Focusing on under-covered areas. Listening for {LISTEN_DURATION} seconds...")
             start = time.time()
-            while time.time() - start < LISTEN_DURATION:
+            while time.time() - start < duration:
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     data = json.loads(msg)
+                    mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
+                    if mmsi not in target_mmsis: continue
+                    
+                    if mmsi not in received:
+                        received[mmsi] = {
+                            "mmsi": mmsi, "lat": None, "lng": None, "speed": 0.0, "heading": 0.0,
+                            "name": data.get("MetaData", {}).get("ShipName", "").strip(),
+                            "destination": "", "eta": "", "timestamp": data.get("MetaData", {}).get("time_utc")
+                        }
                     
                     if data.get("MessageType") == "PositionReport":
                         pos = data.get("Message", {}).get("PositionReport", {})
-                        lat = pos.get("Latitude")
-                        lng = pos.get("Longitude")
-                        
-                        if lat is not None and lng is not None and -90 <= lat <= 90 and -180 <= lng <= 180:
-                            collected_points.append([round(lat, 2), round(lng, 2)])
-                except asyncio.TimeoutError:
-                    continue
-                except Exception:
-                    continue
-    except Exception as e: 
-        print(f"[ERROR] WebSocket connection failed: {e}")
-        
-    return collected_points
+                        received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
+                        received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
+                        received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
+                    elif data.get("MessageType") == "ShipStaticData":
+                        static = data.get("Message", {}).get("ShipStaticData", {})
+                        if dest := static.get("Destination", "").strip():
+                            received[mmsi]["destination"] = dest
+                        eta = static.get("Eta", {})
+                        if eta and eta.get("Month"):
+                            received[mmsi]["eta"] = f"{eta.get('Month'):02d}-{eta.get('Day'):02d} {eta.get('Hour'):02d}:{eta.get('Minute'):02d}"
+                except Exception: continue
+    except Exception as e: print(f"[ERROR] WebSocket: {e}")
+    return received
 
-def generate_coverage_polygon(coords):
-    print(f"Generating polygon from {len(coords)} active points...")
-    
-    # ★ 半径を 50海里(0.83度) から 20海里(0.33度) へ変更
-    BUFFER_DEG = 0.33
-    
-    circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in coords]
-    merged_polygon = unary_union(circles)
-    
-    geojson_feature = {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "geometry": mapping(merged_polygon),
-                "properties": {
-                    "name": "Global AIS Coverage (Active)",
-                    "buffer_nm": 20  # ★ プロパティも20海里に修正
-                }
-            }
-        ]
-    }
-    return geojson_feature
+def smooth_line(coords, iterations=2):
+    if len(coords) < 3: return coords
+    current = coords
+    for _ in range(iterations):
+        smoothed = [current[0]]
+        for i in range(len(current) - 1):
+            p0, p1 = current[i], current[i + 1]
+            smoothed.append([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25])
+            smoothed.append([p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75])
+        smoothed.append(current[-1])
+        current = smoothed
+    return current
 
-def backup_coverage_to_spreadsheet(active_points):
-    client = get_spreadsheet_client()
-    if not client:
-        print("Google Sheets credentials not found. Skipping backup.")
-        return
+def interpolate_sea_route(p1, p2):
     try:
-        wb = client.open_by_key(SPREADSHEET_ID)
-        try:
-            ws_cov = wb.worksheet("AIS_Coverage_History")
-        except:
-            ws_cov = wb.add_worksheet("AIS_Coverage_History", 1000, 10)
-        
-        ws_cov.clear()
-        rows = [["Latitude", "Longitude", "Last_Seen_Timestamp", "Last_Seen_Date"]]
-        for (lat, lng), ts in active_points.items():
-            dt_str = datetime.fromtimestamp(ts, timezone.utc).strftime('%Y/%m/%d %H:%M:%S')
-            rows.append([lat, lng, ts, dt_str])
-        
-        ws_cov.append_rows(rows)
-        print("Successfully backed up coverage points to Spreadsheet.")
-    except Exception as e:
-        print(f"Failed to backup to spreadsheet: {e}")
+        origin = (p1[1], p1[0])
+        destination = (p2[1], p2[0])
+        route = sr.searoute(origin, destination)
+        coords = route.get("geometry", {}).get("coordinates", [])
+        if coords and len(coords) >= 2:
+            return [[round(c[1], 4), round(c[0], 4)] for c in coords]
+    except Exception: pass
+    return None
 
-def main():
+def update_history_and_generate_tracks(live_ships, master_map, existing_latest, client):
+    wb = client.open_by_key(SPREADSHEET_ID)
+    
+    sheet_name = f"Traffic_History_{CURRENT_YEAR}"
+    try: ws_history = wb.worksheet(sheet_name)
+    except: 
+        ws_history = wb.add_worksheet(sheet_name, 1000, 15)
+        ws_history.append_row(["Timestamp", "MMSI", "Name", "Lat", "Lng", "Speed", "Category", "Owner", "Type", "IMO", "Survey"])
+    
+    new_history_rows = []
+    for mmsi, ship in live_ships.items():
+        if mmsi not in master_map: continue
+        if ship["lat"] is None or ship["lng"] is None: continue
+        m_info = master_map.get(mmsi, {})
+        timestamp = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
+        row = [
+            timestamp, mmsi, ship["name"] or m_info.get("name", ""), ship["lat"], ship["lng"], 
+            ship["speed"], m_info.get("category", ""), m_info.get("owner", ""), m_info.get("type", ""), 
+            m_info.get("imo", ""), m_info.get("survey", "")
+        ]
+        new_history_rows.append(row)
+        
+    if new_history_rows:
+        ws_history.append_rows(new_history_rows)
+
+    all_history = ws_history.get_all_values()
+    tracks_map = {}
+    for idx, row in enumerate(all_history[1:]):
+        if len(row) < 5: continue
+        mmsi_str = str(row[1]).strip().split(".")[0]
+        if mmsi_str not in master_map: continue
+        try:
+            ts = robust_parse_timestamp(row[0])
+            pt = [round(float(row[3]), 4), round(float(row[4]), 4)]
+            if mmsi_str not in tracks_map: tracks_map[mmsi_str] = []
+            tracks_map[mmsi_str].append((ts, pt, idx))
+        except: continue
+
+    routes_output = []
+    calculated_headings = {}
+    
+    grid_mmsi_map = defaultdict(set)
+    GRID_SIZE = 0.08
+
+    for mmsi, data_list in tracks_map.items():
+        if not data_list: continue
+        data_list.sort(key=lambda x: (x[0], x[2]))
+        
+        cleaned_list = []
+        for item in data_list:
+            if not cleaned_list or cleaned_list[-1][1] != item[1]:
+                cleaned_list.append((item[0], item[1]))
+                
+        latest_coord = None
+        if mmsi in existing_latest:
+            curr_lat = existing_latest[mmsi].get("lat")
+            curr_lng = existing_latest[mmsi].get("lng")
+            if curr_lat is not None and curr_lng is not None:
+                latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
+                if not cleaned_list or cleaned_list[-1][1] != latest_coord:
+                    cleaned_list.append((datetime.now(timezone.utc), latest_coord))
+
+        if len(cleaned_list) < 2: continue
+        category = master_map.get(mmsi, {}).get("category", "外国籍船")
+
+        sub_lines = []
+        curr_sub = [cleaned_list[0][1]]
+        for i in range(1, len(cleaned_list)):
+            prev_t, prev_p = cleaned_list[i-1]
+            curr_t, curr_p = cleaned_list[i]
+            dlat = abs(curr_p[0] - prev_p[0])
+            dlng = abs(curr_p[1] - prev_p[1])
+            
+            if dlat > 0.25 or dlng > 0.25:
+                interpolated = interpolate_sea_route(prev_p, curr_p)
+                if interpolated and len(interpolated) >= 2:
+                    for mid_p in interpolated[1:]: curr_sub.append(mid_p)
+                else:
+                    curr_sub.append(curr_p)
+            else:
+                curr_sub.append(curr_p)
+
+        if len(curr_sub) >= 2:
+            sub_lines.append(curr_sub)
+        elif len(curr_sub) == 1 and sub_lines:
+            sub_lines[-1].append(curr_sub[0])
+
+        if latest_coord and sub_lines and sub_lines[-1]:
+            sub_lines[-1][-1] = latest_coord
+
+        heading = 0.0
+        if len(sub_lines) > 0 and len(sub_lines[-1]) >= 2:
+            p_prev = sub_lines[-1][-2]
+            p_last = sub_lines[-1][-1]
+            heading = calculate_bearing(p_prev, p_last)
+            calculated_headings[mmsi] = heading
+
+        smoothed_sub_lines = []
+        for sub in sub_lines:
+            if len(sub) > 200:
+                step = len(sub) / 200.0
+                sub_sampled = [sub[int(j * step)] for j in range(200)]
+                if sub_sampled[-1] != sub[-1]: sub_sampled.append(sub[-1])
+            else:
+                sub_sampled = sub
+            smoothed = smooth_line(sub_sampled, iterations=2)
+            smoothed_sub_lines.append(smoothed)
+
+        total_segments = sum(len(s) - 1 for s in smoothed_sub_lines if len(s) >= 2)
+        segments = []
+
+        if total_segments > 0:
+            current_seg_idx = 0
+            for smoothed in smoothed_sub_lines:
+                for i in range(len(smoothed) - 1):
+                    p1, p2 = smoothed[i], smoothed[i+1]
+                    ratio = current_seg_idx / max(1, total_segments - 1)
+                    opacity = round(0.15 + (0.80 * ratio), 2)
+                    
+                    mid_lat = (p1[0] + p2[0]) / 2.0
+                    mid_lng = (p1[1] + p2[1]) / 2.0
+                    g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
+                    
+                    grid_mmsi_map[g_key].add(mmsi)
+
+                    segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
+                    current_seg_idx += 1
+
+        if segments:
+            routes_output.append({
+                "mmsi": mmsi, 
+                "category": category, 
+                "heading": heading, 
+                "segments": segments
+            })
+
+    for r in routes_output:
+        for seg in r["segments"]:
+            g_key = seg.pop("g_key", None)
+            seg["count"] = len(grid_mmsi_map.get(g_key, set()))
+
+    for mmsi, ship in existing_latest.items():
+        ship["heading"] = calculated_headings.get(mmsi, 0.0)
+
+    with open(ROUTES_FILE, "w", encoding="utf-8") as f:
+        json.dump(routes_output, f, ensure_ascii=False)
+
+    return calculated_headings
+
+# ★ 船の位置からカバーエリアマップを更新する機能
+def update_coverage_from_live_ships(live_ships):
     current_time = time.time()
     six_months_ago = current_time - EXPIRATION_SECONDS
 
     existing_points_dict = {}
-    if os.path.exists(POINTS_FILE):
+    if os.path.exists(COVERAGE_POINTS_FILE):
         try:
-            with open(POINTS_FILE, "r", encoding="utf-8") as f:
+            with open(COVERAGE_POINTS_FILE, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
                 for item in raw_data:
-                    lat, lng = item[0], item[1]
-                    ts = item[2] if len(item) >= 3 else current_time
-                    existing_points_dict[(lat, lng)] = ts
-        except Exception as e:
-            print(f"Error loading {POINTS_FILE}: {e}")
-            
-    print(f"Loaded {len(existing_points_dict)} existing coverage points.")
+                    if len(item) >= 2:
+                        lat, lng = item[0], item[1]
+                        ts = item[2] if len(item) >= 3 else current_time
+                        existing_points_dict[(lat, lng)] = ts
+        except Exception:
+            pass
 
-    bboxes = get_under_covered_bboxes(list(existing_points_dict.keys()), grid_size=30, max_boxes=12)
-    new_points = asyncio.run(collect_coverage_data(bboxes))
-    print(f"Collected {len(new_points)} new points.")
+    # 今回受信できた船の座標をカバーエリアとして追加（小数点2桁＝約1km四方に丸める）
+    for mmsi, ship in live_ships.items():
+        lat = ship.get("lat")
+        lng = ship.get("lng")
+        if lat is not None and lng is not None:
+            existing_points_dict[(round(lat, 2), round(lng, 2))] = current_time
 
-    for pt in new_points:
-        lat, lng = pt[0], pt[1]
-        existing_points_dict[(lat, lng)] = current_time
-
+    # 期限切れを削除
     active_points = {}
-    expired_count = 0
     for coords, ts in existing_points_dict.items():
         if ts >= six_months_ago:
             active_points[coords] = ts
-        else:
-            expired_count += 1
-            
-    print(f"Total active coverage points: {len(active_points)} (Expired: {expired_count})")
 
+    # ポイント保存
     merged_points = [[k[0], k[1], v] for k, v in active_points.items()]
-    with open(POINTS_FILE, "w", encoding="utf-8") as f:
+    with open(COVERAGE_POINTS_FILE, "w", encoding="utf-8") as f:
         json.dump(merged_points, f, ensure_ascii=False)
-        
-    backup_coverage_to_spreadsheet(active_points)
 
+    # GeoJSONとして保存（半径20海里 = 0.33度）
     if active_points:
-        coverage_geojson = generate_coverage_polygon(list(active_points.keys()))
+        BUFFER_DEG = 0.33
+        circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in active_points.keys()]
+        merged_polygon = unary_union(circles)
+        
+        coverage_geojson = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": mapping(merged_polygon),
+                    "properties": {
+                        "name": "Global AIS Coverage (Active)",
+                        "buffer_nm": 20
+                    }
+                }
+            ]
+        }
         with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(coverage_geojson, f, ensure_ascii=False)
-        print("Coverage map successfully updated.")
-    else:
-        print("No points to generate coverage map.")
+
+
+def main():
+    client = get_spreadsheet_client()
+    if not client: return
+    master_map, master_counts = get_master_data(client)
+    
+    existing_latest = {}
+    if os.path.exists(LATEST_FILE):
+        try:
+            with open(LATEST_FILE, "r", encoding="utf-8") as f:
+                for s in json.load(f).get("latest", []):
+                    m_key = str(s.get("mmsi", "")).strip().split(".")[0]
+                    if m_key and m_key in master_map:
+                        existing_latest[m_key] = s
+        except Exception: pass
+
+    bboxes = generate_targeted_bboxes(master_map, existing_latest)
+
+    # 電波から船の位置を受信
+    live_ships = asyncio.run(collect_ais_data(set(master_map.keys()), bboxes))
+    
+    # ★ 受信できた座標を使って緑色マップを同時に更新
+    if live_ships:
+        update_coverage_from_live_ships(live_ships)
+
+    for mmsi, ship in live_ships.items():
+        if mmsi not in master_map: continue
+        m_info = master_map.get(mmsi, {})
+        existing_latest[mmsi] = {
+            "mmsi": mmsi,
+            "name": m_info.get("name") or ship["name"] or f"MMSI:{mmsi}",
+            "imo": m_info.get("imo", "-"),
+            "category": m_info.get("category", "日本船社運航船"),
+            "flag": m_info.get("flag", "-"),
+            "type": m_info.get("type", "-"),
+            "gt": m_info.get("gt", "-"),
+            "owner": m_info.get("owner", "-"),
+            "operator": m_info.get("operator", "-"),
+            "survey": m_info.get("survey", "-"),
+            "lat": ship["lat"],
+            "lng": ship["lng"],
+            "speed": ship["speed"],
+            "heading": 0.0,
+            "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
+            "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
+            "timestamp": ship["timestamp"]
+        }
+
+    for mmsi, ship_data in existing_latest.items():
+        if mmsi in master_map:
+            m = master_map[mmsi]
+            if not ship_data.get("name") or ship_data["name"].startswith("MMSI:"):
+                ship_data["name"] = m["name"] or ship_data["name"]
+            if ship_data.get("imo") in ("-", "", None): ship_data["imo"] = m["imo"]
+            if ship_data.get("category") in ("日本船社運航船", "", None): ship_data["category"] = m["category"]
+            if ship_data.get("flag") in ("-", "", None): ship_data["flag"] = m["flag"]
+            if ship_data.get("type") in ("-", "", None): ship_data["type"] = m["type"]
+            if ship_data.get("gt") in ("-", "", None): ship_data["gt"] = m["gt"]
+            if ship_data.get("owner") in ("-", "", None): ship_data["owner"] = m["owner"]
+            if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
+            if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
+
+    update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
+
+    with open(LATEST_FILE, "w", encoding="utf-8") as f:
+        json.dump({"masterCounts": master_counts, "latest": list(existing_latest.values())}, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
     main()
