@@ -14,12 +14,13 @@ from google.oauth2.service_account import Credentials
 
 try:
     import searoute as sr
-    from shapely.geometry import Point, mapping
+    # ★ LineString を追加して間引き処理に利用
+    from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
     import searoute as sr
-    from shapely.geometry import Point, mapping
+    from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
@@ -195,6 +196,18 @@ def smooth_line(coords, iterations=2):
         current = smoothed
     return current
 
+# ★ 追加：ダグラス・プーッカーアルゴリズム等を用いた間引き（ダイエット）処理
+def simplify_line(coords, tolerance=0.002):
+    """ tolerance: 0.002度は約200m。この範囲内の不要な直線の頂点を間引く """
+    if len(coords) < 3: return coords
+    try:
+        # shapelyのLineStringを使って幾何学的に簡略化
+        line = LineString([(c[1], c[0]) for c in coords])
+        simplified = line.simplify(tolerance, preserve_topology=False)
+        return [[round(c[1], 5), round(c[0], 5)] for c in simplified.coords]
+    except Exception:
+        return coords
+
 def interpolate_sea_route(p1, p2):
     try:
         origin = (p1[1], p1[0])
@@ -259,6 +272,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
+        # 最新位置の強制結合（フロントエンドの結合処理を肩代わり）
         latest_coord = None
         if mmsi in existing_latest:
             curr_lat = existing_latest[mmsi].get("lat")
@@ -311,7 +325,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if sub_sampled[-1] != sub[-1]: sub_sampled.append(sub[-1])
             else:
                 sub_sampled = sub
+            
+            # 丸め処理
             smoothed = smooth_line(sub_sampled, iterations=2)
+            # ★ 処理追加：間引き（ダイエット）を行ってデータ量を劇的に削減
+            smoothed = simplify_line(smoothed, tolerance=0.002)
+            
             smoothed_sub_lines.append(smoothed)
 
         total_segments = sum(len(s) - 1 for s in smoothed_sub_lines if len(s) >= 2)
@@ -342,10 +361,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
+    # ★ 処理追加：線の太さ倍率（weight_multiplier）を事前計算
     for r in routes_output:
         for seg in r["segments"]:
             g_key = seg.pop("g_key", None)
-            seg["count"] = len(grid_mmsi_map.get(g_key, set()))
+            count = len(grid_mmsi_map.get(g_key, set()))
+            # countから線の太さ倍率を事前に計算して固定値として保存（ブラウザの計算負荷ゼロへ）
+            w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
+            seg["weight_multiplier"] = round(w_mult, 2)
 
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, 0.0)
@@ -372,7 +395,6 @@ def update_coverage_from_all_latest(existing_latest):
         except Exception:
             pass
 
-    # ★ 画面上に残っている「すべての船（ゴースト含む）」をカバーエリアに登録する
     for mmsi, ship in existing_latest.items():
         lat = ship.get("lat")
         lng = ship.get("lng")
@@ -468,9 +490,7 @@ def main():
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
 
-    # ★ 画面上の全船舶（最新・過去問わず）の座標を使って緑マップを更新
     update_coverage_from_all_latest(existing_latest)
-
     update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
 
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
