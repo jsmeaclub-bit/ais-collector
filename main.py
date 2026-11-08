@@ -14,7 +14,6 @@ from google.oauth2.service_account import Credentials
 
 try:
     import searoute as sr
-    # ★ LineString を追加して間引き処理に利用
     from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 except ImportError:
@@ -64,6 +63,8 @@ def get_master_data(client):
     records = sheet.get_all_records()
     master_map = {}
     flag_cnt, ctrl_cnt = 0, 0
+    type_counts_dict = defaultdict(int) # ★追加：船種ごとの集計用
+    
     for r in records:
         mmsi = str(r.get("MMSI", "")).strip().split(".")[0]
         if not mmsi or mmsi in ("nan", "None", "0"): continue
@@ -76,19 +77,28 @@ def get_master_data(client):
         if cat == "日本籍船": flag_cnt += 1
         else: ctrl_cnt += 1
         
+        ship_type = str(r.get("Ship Type", "-")).strip()
+        if not ship_type: ship_type = "-"
+        type_counts_dict[ship_type] += 1 # ★追加：船種をカウント
+        
         master_map[mmsi] = {
             "mmsi": mmsi,
             "name": str(r.get("Name of Ship", "")).strip(),
             "imo": str(r.get("IMO/LR/IHS No.", "-")).strip(),
             "category": cat,
             "flag": str(r.get("Flag", "-")).strip(),
-            "type": str(r.get("Ship Type", "-")).strip(),
+            "type": ship_type,
             "gt": str(r.get("GT", "-")).strip(),
             "owner": str(r.get("Registered Owner", "-")).strip(),
             "operator": str(r.get("Operator", "-")).strip(),
             "survey": str(r.get("Special Survey", "-")).strip()
         }
-    return master_map, {"total": len(master_map), "flag": flag_cnt, "ctrl": ctrl_cnt}
+        
+    # ★追加：集計結果を多い順（降順）にソートしてリスト化
+    sorted_types = sorted(type_counts_dict.items(), key=lambda x: x[1], reverse=True)
+    type_counts_list = [{"type": k, "count": v} for k, v in sorted_types]
+    
+    return master_map, {"total": len(master_map), "flag": flag_cnt, "ctrl": ctrl_cnt, "type_counts": type_counts_list}
 
 def robust_parse_timestamp(ts_str):
     ts_str = str(ts_str).strip()
@@ -196,12 +206,9 @@ def smooth_line(coords, iterations=2):
         current = smoothed
     return current
 
-# ★ 追加：ダグラス・プーッカーアルゴリズム等を用いた間引き（ダイエット）処理
 def simplify_line(coords, tolerance=0.002):
-    """ tolerance: 0.002度は約200m。この範囲内の不要な直線の頂点を間引く """
     if len(coords) < 3: return coords
     try:
-        # shapelyのLineStringを使って幾何学的に簡略化
         line = LineString([(c[1], c[0]) for c in coords])
         simplified = line.simplify(tolerance, preserve_topology=False)
         return [[round(c[1], 5), round(c[0], 5)] for c in simplified.coords]
@@ -272,7 +279,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
-        # 最新位置の強制結合（フロントエンドの結合処理を肩代わり）
         latest_coord = None
         if mmsi in existing_latest:
             curr_lat = existing_latest[mmsi].get("lat")
@@ -326,9 +332,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = sub
             
-            # 丸め処理
             smoothed = smooth_line(sub_sampled, iterations=2)
-            # ★ 処理追加：間引き（ダイエット）を行ってデータ量を劇的に削減
             smoothed = simplify_line(smoothed, tolerance=0.002)
             
             smoothed_sub_lines.append(smoothed)
@@ -361,12 +365,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
-    # ★ 処理追加：線の太さ倍率（weight_multiplier）を事前計算
     for r in routes_output:
         for seg in r["segments"]:
             g_key = seg.pop("g_key", None)
             count = len(grid_mmsi_map.get(g_key, set()))
-            # countから線の太さ倍率を事前に計算して固定値として保存（ブラウザの計算負荷ゼロへ）
             w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
 
