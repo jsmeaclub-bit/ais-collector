@@ -254,7 +254,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
     now_utc = datetime.now(timezone.utc)
     month_str = now_utc.strftime("%Y-%m")
     
-    # ★ 指定フォルダ：data/history/2026 
     history_dir = os.path.join(DATA_DIR, "history", str(CURRENT_YEAR))
     os.makedirs(history_dir, exist_ok=True)
     history_file_path = os.path.join(history_dir, f"history_{month_str}.csv.gz")
@@ -276,7 +275,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                 writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading"])
             writer.writerows(new_history_rows)
 
-    # 2. 過去データの読み込み（ヘッダー列自動判定機能付き）
+    # 2. 過去データの読み込み（新旧フォーマット混在対応）
     tracks_map = defaultdict(list)
     
     if os.path.exists(history_dir):
@@ -287,16 +286,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             file_path = os.path.join(history_dir, file)
             try:
                 open_func = gzip.open if file_path.endswith('.csv.gz') else open
-                # utf-8-sig で ExcelのBOM等を除去して安全に読み込む
                 with open_func(file_path, "rt", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
                     header = next(reader, None)
                     if not header: continue
                     
-                    # デフォルトの列番号
                     c_ts, c_mmsi, c_lat, c_lng = 0, 1, 2, 3
                     
-                    # ★ 実際のヘッダー行から列の位置を自動特定（スプレッドシート由来への対応）
+                    # 実際のヘッダー行から列の位置を自動特定
                     for i, col_name in enumerate(header):
                         c_name = col_name.strip().lower()
                         if "lat" in c_name or "緯度" in c_name: c_lat = i
@@ -305,13 +302,23 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                         elif "time" in c_name or "date" in c_name or "timestamp" in c_name or "日付" in c_name: c_ts = i
 
                     for idx, row in enumerate(reader):
-                        # 必要な列が揃っていない行はスキップ
-                        if len(row) <= max(c_lat, c_lng, c_mmsi, c_ts): continue
-                        mmsi_str = str(row[c_mmsi]).strip().split(".")[0]
+                        if len(row) < 4: continue
+                        
+                        # ★ スプレッドシート由来の旧フォーマットとPython追記の新フォーマットの混在対策
+                        if len(row) == 6:
+                            # Pythonが追記した新フォーマット [Timestamp, MMSI, Lat, Lng, Speed, Heading]
+                            r_ts, r_mmsi, r_lat, r_lng = row[0], row[1], row[2], row[3]
+                        elif len(row) > max(c_lat, c_lng, c_mmsi, c_ts):
+                            # スプレッドシートから移行した旧フォーマット
+                            r_ts, r_mmsi, r_lat, r_lng = row[c_ts], row[c_mmsi], row[c_lat], row[c_lng]
+                        else:
+                            continue
+
+                        mmsi_str = str(r_mmsi).strip().split(".")[0]
                         if mmsi_str not in master_map: continue
                         try:
-                            ts = robust_parse_timestamp(row[c_ts])
-                            pt = [round(float(row[c_lat]), 4), round(float(row[c_lng]), 4)]
+                            ts = robust_parse_timestamp(r_ts)
+                            pt = [round(float(r_lat), 4), round(float(r_lng), 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx))
                         except Exception: 
                             continue
@@ -424,7 +431,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
 
-    # 4. 前回の進行方向(Heading)を引き継ぎつつ、新しい計算結果があれば更新する
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, ship.get("heading", 0.0))
 
