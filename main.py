@@ -8,7 +8,6 @@ import sys
 import websockets
 import gzip
 import csv
-import glob
 from collections import defaultdict
 from datetime import datetime, timezone
 import gspread
@@ -255,10 +254,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
     now_utc = datetime.now(timezone.utc)
     month_str = now_utc.strftime("%Y-%m")
     
+    # ★ 指定フォルダ：data/history/2026 
     history_dir = os.path.join(DATA_DIR, "history", str(CURRENT_YEAR))
     os.makedirs(history_dir, exist_ok=True)
     history_file_path = os.path.join(history_dir, f"history_{month_str}.csv.gz")
 
+    # 1. 新しい受信データの書き込み
     new_history_rows = []
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
@@ -275,22 +276,21 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                 writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading"])
             writer.writerows(new_history_rows)
 
+    # 2. 過去データの読み込み（ご指摘の通り data/history/2026 を明確に指定）
     tracks_map = defaultdict(list)
     
-    # ★ 改善：data/history 内のすべての csv と csv.gz を見つけ出し、BOMを無視して安全に読み込む
-    history_base_dir = os.path.join(DATA_DIR, "history")
-    if os.path.exists(history_base_dir):
-        # サブフォルダ含め再帰的に探索
-        all_csv_files = glob.glob(os.path.join(history_base_dir, "**", "*.csv*"), recursive=True)
-        for file_path in all_csv_files:
-            if not (file_path.endswith('.csv') or file_path.endswith('.csv.gz')):
+    if os.path.exists(history_dir):
+        for file in os.listdir(history_dir):
+            if not (file.endswith('.csv') or file.endswith('.csv.gz')):
                 continue
+            
+            file_path = os.path.join(history_dir, file)
             try:
                 open_func = gzip.open if file_path.endswith('.csv.gz') else open
-                # utf-8-sig を指定し、Excel等の不要なBOMを排除
+                # utf-8-sig で ExcelのBOM等を除去して安全に読み込む
                 with open_func(file_path, "rt", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
-                    next(reader, None)  # ヘッダーをスキップ
+                    next(reader, None)  # ヘッダー行をスキップ
                     for idx, row in enumerate(reader):
                         if len(row) < 4: continue
                         mmsi_str = str(row[1]).strip()
@@ -303,6 +303,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
 
+    # 3. 航跡データの生成と進行方向(Heading)の計算
     routes_output = []
     calculated_headings = {}
     grid_mmsi_map = defaultdict(set)
@@ -408,7 +409,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
 
-    # ★ 改善：計算できた進行方向（Heading）のみ更新し、計算できない場合は前回の向きを維持する
+    # 4. 前回の進行方向(Heading)を引き継ぎつつ、新しい計算結果があれば更新する
     for mmsi, ship in existing_latest.items():
         ship["heading"] = calculated_headings.get(mmsi, ship.get("heading", 0.0))
 
@@ -509,7 +510,6 @@ def main():
             "lat": ship["lat"],
             "lng": ship["lng"],
             "speed": ship["speed"],
-            # ★ 改善：初回の処理では過去の進行方向を引き継ぐ（ゼロリセットを防ぐ）
             "heading": existing_latest.get(mmsi, {}).get("heading", 0.0),
             "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
             "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
