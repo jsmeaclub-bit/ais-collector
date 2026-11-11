@@ -6,6 +6,8 @@ import asyncio
 import subprocess
 import sys
 import websockets
+import gzip
+import csv
 from collections import defaultdict
 from datetime import datetime, timezone
 import gspread
@@ -128,17 +130,14 @@ def generate_targeted_bboxes(master_map, existing_latest):
         
         hours_offline = (now_utc - last_time).total_seconds() / 3600.0
         
-        # 24時間以上更新がない船を「行方不明」としてターゲット化
         if hours_offline > 24:
             lat = ship.get("lat")
             lng = ship.get("lng")
             if lat is not None and lng is not None:
-                # ★改善：行方不明時間が長いほど、捜索エリアを自動で広げる（最大20度＝約2000km四方）
-                expansion = min(20.0, hours_offline * 0.35) # 1時間に約0.35度(約20ノット)移動すると仮定
+                expansion = min(20.0, hours_offline * 0.35) 
                 missing_or_old_ships.append((lat, lng, expansion))
     
     targeted_bboxes = []
-    # 行方不明時間が長い（捜索エリアが広い）順に優先してBBoxを作成
     missing_or_old_ships.sort(key=lambda x: x[2], reverse=True)
     
     for lat, lng, exp in missing_or_old_ships:
@@ -148,17 +147,15 @@ def generate_targeted_bboxes(master_map, existing_latest):
         max_lng = min(180, lng + exp + 2)
         targeted_bboxes.append([[min_lat, min_lng], [max_lat, max_lng]])
     
-    # ターゲットは最大5件まで。残りは世界の主要チョークポイントと全世界を指定
     base_bboxes = [
-        [[-40, -20], [35, 60]],  # アフリカ・欧州
-        [[-15, 60], [30, 140]],  # アジア・インド洋
-        [[-90, -180], [90, 180]] # 全世界（フォールバック）
+        [[-40, -20], [35, 60]],  
+        [[-15, 60], [30, 140]],  
+        [[-90, -180], [90, 180]] 
     ]
     
     final_bboxes = targeted_bboxes[:5] + base_bboxes
     return final_bboxes
 
-# ★改善：受信データの解読をバックグラウンドで行うワーカー関数（バケツリレーの受け手）
 async def process_message_queue(queue, target_mmsis, received):
     while True:
         msg = await queue.get()
@@ -166,7 +163,6 @@ async def process_message_queue(queue, target_mmsis, received):
             data = json.loads(msg)
             mmsi = str(data.get("MetaData", {}).get("MMSI", "")).strip().split(".")[0]
             
-            # 対象船のデータだけを処理（それ以外は即座に破棄してメモリとCPUを節約）
             if mmsi in target_mmsis:
                 if mmsi not in received:
                     received[mmsi] = {
@@ -197,15 +193,12 @@ async def collect_ais_data(target_mmsis, bboxes):
     received = {}
     if not AISSTREAM_API_KEY: return received
     
-    # ★改善：実行時間を「確定で6分（360秒）」に設定。停泊船やStatic Dataの送信周期（3〜6分）を確実に網羅する
     duration = 360 if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 60
     url = "wss://stream.aisstream.io/v0/stream"
     
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
 
-    # ★改善：濁流データをパケットロスなく受け止めるためのキュー（バケツ）を用意
     queue = asyncio.Queue()
-    # ワーカーを起動
     consumer_task = asyncio.create_task(process_message_queue(queue, target_mmsis, received))
 
     try:
@@ -214,7 +207,6 @@ async def collect_ais_data(target_mmsis, bboxes):
             start = time.time()
             while time.time() - start < duration:
                 try:
-                    # データを受信したら、解読せずに即座にキュー（バケツ）に放り込む。これで受信口が絶対に詰まらない
                     msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     await queue.put(msg)
                 except asyncio.TimeoutError:
@@ -224,7 +216,6 @@ async def collect_ais_data(target_mmsis, bboxes):
     except Exception as e: 
         print(f"[ERROR] WebSocket connection: {e}")
         
-    # 受信終了後、キューに残っているデータがすべて処理されるのを待つ
     await queue.join()
     consumer_task.cancel()
     
@@ -263,43 +254,51 @@ def interpolate_sea_route(p1, p2):
     except Exception: pass
     return None
 
-def update_history_and_generate_tracks(live_ships, master_map, existing_latest, client):
-    wb = client.open_by_key(SPREADSHEET_ID)
+def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
+    now_utc = datetime.now(timezone.utc)
+    month_str = now_utc.strftime("%Y-%m")
     
-    sheet_name = f"Traffic_History_{CURRENT_YEAR}"
-    try: ws_history = wb.worksheet(sheet_name)
-    except: 
-        ws_history = wb.add_worksheet(sheet_name, 1000, 15)
-        ws_history.append_row(["Timestamp", "MMSI", "Name", "Lat", "Lng", "Speed", "Category", "Owner", "Type", "IMO", "Survey"])
-    
+    history_dir = os.path.join(DATA_DIR, "history", str(CURRENT_YEAR))
+    os.makedirs(history_dir, exist_ok=True)
+    history_file_path = os.path.join(history_dir, f"history_{month_str}.csv.gz")
+
     new_history_rows = []
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
         if ship["lat"] is None or ship["lng"] is None: continue
-        m_info = master_map.get(mmsi, {})
-        timestamp = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S")
-        row = [
-            timestamp, mmsi, ship["name"] or m_info.get("name", ""), ship["lat"], ship["lng"], 
-            ship["speed"], m_info.get("category", ""), m_info.get("owner", ""), m_info.get("type", ""), 
-            m_info.get("imo", ""), m_info.get("survey", "")
-        ]
+        timestamp = now_utc.strftime("%Y/%m/%d %H:%M:%S")
+        row = [timestamp, mmsi, ship["lat"], ship["lng"], ship["speed"], ship["heading"]]
         new_history_rows.append(row)
-        
-    if new_history_rows:
-        ws_history.append_rows(new_history_rows)
 
-    all_history = ws_history.get_all_values()
-    tracks_map = {}
-    for idx, row in enumerate(all_history[1:]):
-        if len(row) < 5: continue
-        mmsi_str = str(row[1]).strip().split(".")[0]
-        if mmsi_str not in master_map: continue
-        try:
-            ts = robust_parse_timestamp(row[0])
-            pt = [round(float(row[3]), 4), round(float(row[4]), 4)]
-            if mmsi_str not in tracks_map: tracks_map[mmsi_str] = []
-            tracks_map[mmsi_str].append((ts, pt, idx))
-        except: continue
+    if new_history_rows:
+        file_exists = os.path.exists(history_file_path)
+        with gzip.open(history_file_path, "at", encoding="utf-8", newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading"])
+            writer.writerows(new_history_rows)
+
+    tracks_map = defaultdict(list)
+    
+    if os.path.exists(history_dir):
+        for file in os.listdir(history_dir):
+            if file.endswith(".csv.gz"):
+                file_path = os.path.join(history_dir, file)
+                try:
+                    with gzip.open(file_path, "rt", encoding="utf-8") as f:
+                        reader = csv.reader(f)
+                        next(reader, None) 
+                        for idx, row in enumerate(reader):
+                            if len(row) < 4: continue
+                            mmsi_str = str(row[1]).strip()
+                            if mmsi_str not in master_map: continue
+                            try:
+                                ts = robust_parse_timestamp(row[0])
+                                pt = [round(float(row[2]), 4), round(float(row[3]), 4)]
+                                tracks_map[mmsi_str].append((ts, pt, idx))
+                            except: continue
+                except Exception as e:
+                    print(f"Error reading history file {file}: {e}")
 
     routes_output = []
     calculated_headings = {}
@@ -323,7 +322,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if curr_lat is not None and curr_lng is not None:
                 latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
                 if not cleaned_list or cleaned_list[-1][1] != latest_coord:
-                    cleaned_list.append((datetime.now(timezone.utc), latest_coord))
+                    cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
@@ -530,10 +529,16 @@ def main():
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
 
     update_coverage_from_all_latest(existing_latest)
-    update_history_and_generate_tracks(live_ships, master_map, existing_latest, client)
+    update_history_and_generate_tracks(live_ships, master_map, existing_latest)
+    
+    recent_count = len([mmsi for mmsi, ship in live_ships.items() if ship.get("lat") is not None and ship.get("lng") is not None])
 
     with open(LATEST_FILE, "w", encoding="utf-8") as f:
-        json.dump({"masterCounts": master_counts, "latest": list(existing_latest.values())}, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "masterCounts": master_counts, 
+            "recent_count": recent_count,
+            "latest": list(existing_latest.values())
+        }, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
     main()
