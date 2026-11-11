@@ -8,6 +8,7 @@ import sys
 import websockets
 import gzip
 import csv
+import glob
 from collections import defaultdict
 from datetime import datetime, timezone
 import gspread
@@ -127,7 +128,6 @@ def generate_targeted_bboxes(master_map, existing_latest):
         ship = existing_latest[mmsi]
         ts_str = ship.get("timestamp", "")
         last_time = robust_parse_timestamp(ts_str)
-        
         hours_offline = (now_utc - last_time).total_seconds() / 3600.0
         
         if hours_offline > 24:
@@ -195,9 +195,7 @@ async def collect_ais_data(target_mmsis, bboxes):
     
     duration = 360 if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 60
     url = "wss://stream.aisstream.io/v0/stream"
-    
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
-
     queue = asyncio.Queue()
     consumer_task = asyncio.create_task(process_message_queue(queue, target_mmsis, received))
 
@@ -218,7 +216,6 @@ async def collect_ais_data(target_mmsis, bboxes):
         
     await queue.join()
     consumer_task.cancel()
-    
     return received
 
 def smooth_line(coords, iterations=2):
@@ -280,29 +277,34 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
 
     tracks_map = defaultdict(list)
     
-    if os.path.exists(history_dir):
-        for file in os.listdir(history_dir):
-            if file.endswith(".csv.gz"):
-                file_path = os.path.join(history_dir, file)
-                try:
-                    with gzip.open(file_path, "rt", encoding="utf-8") as f:
-                        reader = csv.reader(f)
-                        next(reader, None) 
-                        for idx, row in enumerate(reader):
-                            if len(row) < 4: continue
-                            mmsi_str = str(row[1]).strip()
-                            if mmsi_str not in master_map: continue
-                            try:
-                                ts = robust_parse_timestamp(row[0])
-                                pt = [round(float(row[2]), 4), round(float(row[3]), 4)]
-                                tracks_map[mmsi_str].append((ts, pt, idx))
-                            except: continue
-                except Exception as e:
-                    print(f"Error reading history file {file}: {e}")
+    # ★ 改善：data/history 内のすべての csv と csv.gz を見つけ出し、BOMを無視して安全に読み込む
+    history_base_dir = os.path.join(DATA_DIR, "history")
+    if os.path.exists(history_base_dir):
+        # サブフォルダ含め再帰的に探索
+        all_csv_files = glob.glob(os.path.join(history_base_dir, "**", "*.csv*"), recursive=True)
+        for file_path in all_csv_files:
+            if not (file_path.endswith('.csv') or file_path.endswith('.csv.gz')):
+                continue
+            try:
+                open_func = gzip.open if file_path.endswith('.csv.gz') else open
+                # utf-8-sig を指定し、Excel等の不要なBOMを排除
+                with open_func(file_path, "rt", encoding="utf-8-sig") as f:
+                    reader = csv.reader(f)
+                    next(reader, None)  # ヘッダーをスキップ
+                    for idx, row in enumerate(reader):
+                        if len(row) < 4: continue
+                        mmsi_str = str(row[1]).strip()
+                        if mmsi_str not in master_map: continue
+                        try:
+                            ts = robust_parse_timestamp(row[0])
+                            pt = [round(float(row[2]), 4), round(float(row[3]), 4)]
+                            tracks_map[mmsi_str].append((ts, pt, idx))
+                        except: continue
+            except Exception as e:
+                print(f"Error reading history file {file_path}: {e}")
 
     routes_output = []
     calculated_headings = {}
-    
     grid_mmsi_map = defaultdict(set)
     GRID_SIZE = 0.08
 
@@ -370,7 +372,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             
             smoothed = smooth_line(sub_sampled, iterations=2)
             smoothed = simplify_line(smoothed, tolerance=0.002)
-            
             smoothed_sub_lines.append(smoothed)
 
         total_segments = sum(len(s) - 1 for s in smoothed_sub_lines if len(s) >= 2)
@@ -387,7 +388,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                     mid_lat = (p1[0] + p2[0]) / 2.0
                     mid_lng = (p1[1] + p2[1]) / 2.0
                     g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
-                    
                     grid_mmsi_map[g_key].add(mmsi)
 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
@@ -408,8 +408,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
             w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
 
+    # ★ 改善：計算できた進行方向（Heading）のみ更新し、計算できない場合は前回の向きを維持する
     for mmsi, ship in existing_latest.items():
-        ship["heading"] = calculated_headings.get(mmsi, 0.0)
+        ship["heading"] = calculated_headings.get(mmsi, ship.get("heading", 0.0))
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
@@ -508,7 +509,8 @@ def main():
             "lat": ship["lat"],
             "lng": ship["lng"],
             "speed": ship["speed"],
-            "heading": 0.0,
+            # ★ 改善：初回の処理では過去の進行方向を引き継ぐ（ゼロリセットを防ぐ）
+            "heading": existing_latest.get(mmsi, {}).get("heading", 0.0),
             "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
             "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
             "timestamp": ship["timestamp"]
