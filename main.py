@@ -276,7 +276,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                 writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading"])
             writer.writerows(new_history_rows)
 
-    # 2. 過去データの読み込み（ご指摘の通り data/history/2026 を明確に指定）
+    # 2. 過去データの読み込み（ヘッダー列自動判定機能付き）
     tracks_map = defaultdict(list)
     
     if os.path.exists(history_dir):
@@ -290,16 +290,31 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                 # utf-8-sig で ExcelのBOM等を除去して安全に読み込む
                 with open_func(file_path, "rt", encoding="utf-8-sig") as f:
                     reader = csv.reader(f)
-                    next(reader, None)  # ヘッダー行をスキップ
+                    header = next(reader, None)
+                    if not header: continue
+                    
+                    # デフォルトの列番号
+                    c_ts, c_mmsi, c_lat, c_lng = 0, 1, 2, 3
+                    
+                    # ★ 実際のヘッダー行から列の位置を自動特定（スプレッドシート由来への対応）
+                    for i, col_name in enumerate(header):
+                        c_name = col_name.strip().lower()
+                        if "lat" in c_name or "緯度" in c_name: c_lat = i
+                        elif "lon" in c_name or "lng" in c_name or "経度" in c_name: c_lng = i
+                        elif "mmsi" in c_name: c_mmsi = i
+                        elif "time" in c_name or "date" in c_name or "timestamp" in c_name or "日付" in c_name: c_ts = i
+
                     for idx, row in enumerate(reader):
-                        if len(row) < 4: continue
-                        mmsi_str = str(row[1]).strip()
+                        # 必要な列が揃っていない行はスキップ
+                        if len(row) <= max(c_lat, c_lng, c_mmsi, c_ts): continue
+                        mmsi_str = str(row[c_mmsi]).strip().split(".")[0]
                         if mmsi_str not in master_map: continue
                         try:
-                            ts = robust_parse_timestamp(row[0])
-                            pt = [round(float(row[2]), 4), round(float(row[3]), 4)]
+                            ts = robust_parse_timestamp(row[c_ts])
+                            pt = [round(float(row[c_lat]), 4), round(float(row[c_lng]), 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx))
-                        except: continue
+                        except Exception: 
+                            continue
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
 
