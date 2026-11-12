@@ -14,13 +14,13 @@ LATEST_FILE = os.path.join("data", f"latest_{CURRENT_YEAR}.json")
 # 答え合わせに使う「主要港の座標マスタ」
 # 緯度(lat), 経度(lng), 判定半径(海里: 1海里は約1.85km)
 PORT_GEO_MASTER = [
-    {"unloc": "CN SHA", "name": "Shanghai", "country": "CN", "lat": 31.00, "lng": 122.00, "radius_nm": 45}, # 洋山・長江河口を含む広域
+    {"unloc": "CN SHA", "name": "Shanghai", "country": "CN", "lat": 31.00, "lng": 122.00, "radius_nm": 45},
     {"unloc": "CN NGB", "name": "Ningbo", "country": "CN", "lat": 29.85, "lng": 122.05, "radius_nm": 30},
     {"unloc": "SG SIN", "name": "Singapore", "country": "SG", "lat": 1.25, "lng": 103.80, "radius_nm": 20},
     {"unloc": "AU PHE", "name": "Port Hedland", "country": "AU", "lat": -20.30, "lng": 118.57, "radius_nm": 15},
     {"unloc": "US LAX", "name": "Los Angeles", "country": "US", "lat": 33.73, "lng": -118.23, "radius_nm": 20},
     {"unloc": "JP YOK", "name": "Yokohama", "country": "JP", "lat": 35.45, "lng": 139.65, "radius_nm": 10},
-    # 必要に応じてここに港の座標を追加していくことで学習対象の港が増えます
+    # 頻繁に寄港する港があれば、ここに追加していくことで学習対象が増えます
 ]
 
 def get_spreadsheet_client():
@@ -78,12 +78,15 @@ def main():
             dist = get_distance_nm(lat, lng, port["lat"], port["lng"])
             if dist <= port["radius_nm"]:
                 # マッチした！新しい表記を学習してリストに追加
+                # ★ ここを5列から7列（Lat, Lng追加）に変更
                 new_row = [
                     dest_str,                # A: 変換元(AIS表記)
                     port["country"],         # B: 国コード
                     port["unloc"],           # C: UN/LOCODE
                     port["name"],            # D: 寄港地名(標準)
-                    "自動学習(位置情報より)"   # E: 備考
+                    "自動学習(位置情報より)",   # E: 備考
+                    port["lat"],             # F: Lat (緯度)
+                    port["lng"]              # G: Lng (経度)
                 ]
                 new_rows.append(new_row)
                 existing_keys.add(dest_str) # 同一処理内での重複を防ぐ
@@ -94,6 +97,11 @@ def main():
     if new_rows:
         sheet.append_rows(new_rows)
         print(f"{len(new_rows)} 件の新しい辞書データをスプレッドシートに追加しました。")
+    else:
+        print("新しく学習する辞書データはありませんでした。")
+
+if __name__ == "__main__":
+    main()
     else:
         print("新しく学習する辞書データはありませんでした。")
 
