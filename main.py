@@ -101,7 +101,6 @@ def get_master_data(client):
     return master_map, {"total": len(master_map), "flag": flag_cnt, "ctrl": ctrl_cnt, "type_counts": type_counts_list}
 
 def get_port_dictionary(client):
-    """スプレッドシートから辞書と座標を取得する"""
     port_dict = {}
     try:
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
@@ -277,10 +276,6 @@ def interpolate_sea_route(p1, p2):
     return None
 
 def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
-    """
-    過去の履歴から仕向地の変更を検知し、寄港推測ルートを生成する
-    ship_history: [(ts, pt, idx, destination_str), ...] のリスト
-    """
     reversed_history = list(reversed(ship_history))
     past_received_pos = None
     past_dest_str = None
@@ -308,13 +303,11 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
     inferred_route_coords = []
     
     try:
-        # ルート1：過去の受信位置 → 特定した寄港地
         route1 = sr.searoute((past_received_pos[1], past_received_pos[0]), (port_pos[1], port_pos[0]))
         coords1 = route1.get("geometry", {}).get("coordinates", [])
         if coords1:
             inferred_route_coords.extend([[round(c[1], 4), round(c[0], 4)] for c in coords1])
             
-        # ルート2：特定した寄港地 → 現在位置
         route2 = sr.searoute((port_pos[1], port_pos[0]), (current_pos[1], current_pos[0]))
         coords2 = route2.get("geometry", {}).get("coordinates", [])
         if coords2:
@@ -342,7 +335,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     os.makedirs(history_dir, exist_ok=True)
     history_file_path = os.path.join(history_dir, f"history_{month_str}.csv.gz")
 
-    # 1. 新しい受信データの書き込み (Destination と ETA を追加)
     new_history_rows = []
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
@@ -372,7 +364,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading", "Destination", "ETA"])
             writer.writerows(new_history_rows)
 
-    # 2. 過去データの読み込み（新旧フォーマット混在と仕向地取得の対応）
     tracks_map = defaultdict(list)
     
     if os.path.exists(history_dir):
@@ -427,7 +418,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
 
-    # 3. 航跡データの生成と進行方向(Heading)の計算・現在位置(△)との同期
     routes_output = []
     calculated_headings = {}
     grid_mmsi_map = defaultdict(set)
@@ -476,7 +466,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # 実測ルート(real_sub_lines)と、SeaRoute補完ルート(inferred_segments)の分離
         real_sub_lines = []
         curr_sub = [cleaned_list[0][1]]
         inferred_segments = []
@@ -489,21 +478,19 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             # 位置飛び判定（0.25度以上離れている場合）
             if dlat > 0.25 or dlng > 0.25:
-                # ここまでの実測ルートを保存
                 if len(curr_sub) >= 2:
                     real_sub_lines.append(curr_sub)
                 elif len(curr_sub) == 1 and real_sub_lines:
                     real_sub_lines[-1].append(curr_sub[0])
                 
-                # SeaRouteで補完し、点線フラグ(is_inferred: True)を付与
                 interpolated = interpolate_sea_route(prev_p, curr_p)
+                # ★ 変更点：点線が確実に描画されるよう、細切れにせず1本の経路として追加
                 if interpolated and len(interpolated) >= 2:
-                    for j in range(len(interpolated)-1):
-                        inferred_segments.append({
-                            "coords": [interpolated[j], interpolated[j+1]],
-                            "opacity": 0.85,
-                            "is_inferred": True
-                        })
+                    inferred_segments.append({
+                        "coords": interpolated,
+                        "opacity": 0.85,
+                        "is_inferred": True
+                    })
                 else:
                     inferred_segments.append({
                         "coords": [prev_p, curr_p],
@@ -511,19 +498,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         "is_inferred": True
                     })
                 
-                # 新しい実測ルートを現在地から開始
                 curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
 
-        # 最後の実測ルートを保存
         if len(curr_sub) >= 2:
             real_sub_lines.append(curr_sub)
         elif len(curr_sub) == 1 and real_sub_lines:
             real_sub_lines[-1].append(curr_sub[0])
-
-        if latest_coord and real_sub_lines and real_sub_lines[-1]:
-            real_sub_lines[-1][-1] = latest_coord
 
         heading = 0.0
         if len(real_sub_lines) > 0 and len(real_sub_lines[-1]) >= 2:
@@ -541,7 +523,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = sub
             
-            # 実測ルートのみスムージング処理
             smoothed = smooth_line(sub_sampled, iterations=2)
             smoothed = simplify_line(smoothed, tolerance=0.002)
             smoothed_sub_lines.append(smoothed)
@@ -549,7 +530,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         total_segments = sum(len(s) - 1 for s in smoothed_sub_lines if len(s) >= 2)
         segments = []
 
-        # 実測ルートのセグメント化（実線用）
         if total_segments > 0:
             current_seg_idx = 0
             for smoothed in smoothed_sub_lines:
@@ -566,18 +546,17 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
                     current_seg_idx += 1
 
-        # 位置飛び補完ルート（点線用）を合流させる
         segments.extend(inferred_segments)
 
-        # 寄港推測ルートの生成と合流（点線用）
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_dest, port_dict)
         
         if inferred_route:
             inf_coords = inferred_route["coords"]
-            for i in range(len(inf_coords) - 1):
+            # ★ 変更点：寄港推測ルートも細切れにせず1本の経路として追加
+            if len(inf_coords) >= 2:
                 segments.append({
-                    "coords": [inf_coords[i], inf_coords[i+1]],
+                    "coords": inf_coords,
                     "opacity": 0.85,
                     "is_inferred": True,  
                     "port_name": inferred_route["port_name"]
