@@ -260,13 +260,27 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
     os.makedirs(history_dir, exist_ok=True)
     history_file_path = os.path.join(history_dir, f"history_{month_str}.csv.gz")
 
-    # 1. 新しい受信データの書き込み
+    # 1. 新しい受信データの書き込み (Destination と ETA を追加)
     new_history_rows = []
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
         if ship["lat"] is None or ship["lng"] is None: continue
         timestamp = now_utc.strftime("%Y/%m/%d %H:%M:%S")
-        row = [timestamp, mmsi, ship["lat"], ship["lng"], ship["speed"], ship["heading"]]
+        
+        # ★ ここで Destination と ETA を取得して末尾に追加
+        dest = ship.get("destination", "")
+        eta = ship.get("eta", "")
+        
+        row = [
+            timestamp, 
+            mmsi, 
+            ship["lat"], 
+            ship["lng"], 
+            ship["speed"], 
+            ship["heading"],
+            dest,  # ★ 追加: 仕向港
+            eta    # ★ 追加: ETA
+        ]
         new_history_rows.append(row)
 
     if new_history_rows:
@@ -274,7 +288,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
         with gzip.open(history_file_path, "at", encoding="utf-8", newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading"])
+                # ★ ヘッダーも8列に変更
+                writer.writerow(["Timestamp", "MMSI", "Lat", "Lng", "Speed", "Heading", "Destination", "ETA"])
             writer.writerows(new_history_rows)
 
     # 2. 過去データの読み込み（新旧フォーマット混在対応）
@@ -305,7 +320,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                     for idx, row in enumerate(reader):
                         if len(row) < 4: continue
                         
-                        if len(row) == 6:
+                        # ★ 6列（過去のデータ）と8列（新しくDestinationを追加したデータ）の混在に対応
+                        if len(row) == 6 or len(row) == 8:
                             r_ts, r_mmsi, r_lat, r_lng = row[0], row[1], row[2], row[3]
                         elif len(row) > max(c_lat, c_lng, c_mmsi, c_ts):
                             r_ts, r_mmsi, r_lat, r_lng = row[c_ts], row[c_mmsi], row[c_lat], row[c_lng]
