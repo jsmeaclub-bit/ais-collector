@@ -281,7 +281,7 @@ def interpolate_sea_route(p1, p2):
 def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
     """
     過去の履歴から仕向地の変更を検知し、寄港推測ルートを生成する。
-    ★重複除外：すでに実測の軌跡が対象港の近く（0.35度以内）を通過している場合は推測ルートを引かない。
+    重複除外：すでに実測の軌跡が対象港の近く（0.35度以内）を通過している場合は推測ルートを引かない。
     """
     if not current_pos:
         return None
@@ -311,7 +311,6 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
         
     port_pos = [port_info["lat"], port_info["lng"]]
 
-    # ★ 重複チェック：最近の履歴（直近30点）で既に対象港の半径0.35度以内に実測データがあるならスキップ
     for _, pt, _, _ in reversed_history[:30]:
         if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35:
             return None
@@ -441,7 +440,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
-        # 1. まず過去ログのみを確実に時系列ソート
         data_list.sort(key=lambda x: (x[0], x[2]))
         
         cleaned_list = []
@@ -449,7 +447,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
-        # 2. ソート完了後に、必ず「現在地（latest_coord）」をリストの最後尾に追加する（順序逆転の完全防止）
         latest_coord = None
         if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
             curr_lat = existing_latest[mmsi]["lat"]
@@ -489,7 +486,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         curr_sub = [cleaned_list[0][1]]
         inferred_segments = []
 
-        # 3. すべての区間（現在地への最終区間を含む）で閾値（GAP_THRESHOLD_DEG = 0.60度）を判定
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p = cleaned_list[i-1]
             curr_t, curr_p = cleaned_list[i]
@@ -497,10 +493,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             dlng = abs(curr_p[1] - prev_p[1])
             
             if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
+                # 2点以上連続した実測のみ実線ルートとして確定（1点だけの孤立点はギャップを跨いで結合しない）
                 if len(curr_sub) >= 2:
                     real_sub_lines.append(curr_sub)
-                elif len(curr_sub) == 1 and real_sub_lines:
-                    real_sub_lines[-1].append(curr_sub[0])
                 
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
@@ -520,12 +515,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 curr_sub.append(curr_p)
 
+        # 末尾も2点以上連続した実測のみ実線ルートとして確定
         if len(curr_sub) >= 2:
             real_sub_lines.append(curr_sub)
-        elif len(curr_sub) == 1 and real_sub_lines:
-            real_sub_lines[-1].append(curr_sub[0])
 
-        # 進行方向（Heading）の計算：最後の実測ライン、なければ最後の点線ラインの末尾2点から算出
         heading = 0.0
         if len(real_sub_lines) > 0 and len(real_sub_lines[-1]) >= 2:
             p_prev = real_sub_lines[-1][-2]
