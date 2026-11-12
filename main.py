@@ -245,18 +245,66 @@ async def collect_ais_data(target_mmsis, bboxes):
     consumer_task.cancel()
     return received
 
-def smooth_line(coords, iterations=2):
-    if len(coords) < 3: return coords
-    current = coords
-    for _ in range(iterations):
-        smoothed = [current[0]]
-        for i in range(len(current) - 1):
-            p0, p1 = current[i], current[i + 1]
-            smoothed.append([p0[0] * 0.75 + p1[0] * 0.25, p0[1] * 0.75 + p1[1] * 0.25])
-            smoothed.append([p0[0] * 0.25 + p1[0] * 0.75, p0[1] * 0.25 + p1[1] * 0.75])
-        smoothed.append(current[-1])
-        current = smoothed
-    return current
+def catmull_rom_chain(coords):
+    """
+    Centripetal Catmull-Rom 3次スプライン曲線で座標列を滑らかに補間する。
+    点間隔が不均一（粗い主要航路ノードと現在地）でもループや不自然な膨らみが生じない。
+    """
+    if len(coords) < 2:
+        return coords
+
+    # 連続する重複点を除去
+    pts = [coords[0]]
+    for c in coords[1:]:
+        if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
+            pts.append(c)
+
+    if len(pts) < 3:
+        return pts
+
+    # 始点と終点に自然な接線を生む仮想制御点を追加
+    p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
+    p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
+    ext_pts = [p_start] + pts + [p_end]
+
+    alpha = 0.5  # Centripetal Catmull-Rom
+    result = []
+
+    def tj(ti, pi, pj):
+        dist = math.hypot(pj[0] - pi[0], pj[1] - pi[1])
+        return ti + max(1e-5, dist ** alpha)
+
+    for i in range(len(ext_pts) - 3):
+        p0, p1, p2, p3 = ext_pts[i], ext_pts[i + 1], ext_pts[i + 2], ext_pts[i + 3]
+        t0 = 0.0
+        t1 = tj(t0, p0, p1)
+        t2 = tj(t1, p1, p2)
+        t3 = tj(t2, p2, p3)
+
+        seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        n_steps = max(6, min(24, int(seg_dist / 0.015) + 4))
+
+        for step in range(n_steps):
+            t = t1 + (t2 - t1) * (step / float(n_steps))
+
+            a1 = [(t1 - t) / (t1 - t0) * p0[0] + (t - t0) / (t1 - t0) * p1[0],
+                  (t1 - t) / (t1 - t0) * p0[1] + (t - t0) / (t1 - t0) * p1[1]]
+            a2 = [(t2 - t) / (t2 - t1) * p1[0] + (t - t1) / (t2 - t1) * p2[0],
+                  (t2 - t) / (t2 - t1) * p1[1] + (t - t1) / (t2 - t1) * p2[1]]
+            a3 = [(t3 - t) / (t3 - t2) * p2[0] + (t - t2) / (t3 - t2) * p3[0],
+                  (t3 - t) / (t3 - t2) * p2[1] + (t - t2) / (t3 - t2) * p3[1]]
+
+            b1 = [(t2 - t) / (t2 - t0) * a1[0] + (t - t0) / (t2 - t0) * a2[0],
+                  (t2 - t) / (t2 - t0) * a1[1] + (t - t0) / (t2 - t0) * a2[1]]
+            b2 = [(t3 - t) / (t3 - t1) * a2[0] + (t - t1) / (t3 - t1) * a3[0],
+                  (t3 - t) / (t3 - t1) * a2[1] + (t - t1) / (t3 - t1) * a3[1]]
+
+            c = [(t2 - t) / (t2 - t1) * b1[0] + (t - t1) / (t2 - t1) * b2[0],
+                 (t2 - t) / (t2 - t1) * b1[1] + (t - t1) / (t2 - t1) * b2[1]]
+            result.append([round(c[0], 5), round(c[1], 5)])
+
+    result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
+    return result
 
 def simplify_line(coords, tolerance=0.002):
     if len(coords) < 3: return coords
@@ -267,6 +315,38 @@ def simplify_line(coords, tolerance=0.002):
     except Exception:
         return coords
 
+def trim_overshoot(route_pts, p1, p2):
+    """
+    searouteが返すネットワーク基準点が、始点(p1)や終点(p2)を通り過ぎて
+    鋭角なV字折り返し(Uターン)を生む場合、過剰な基準点を削除する。
+    """
+    pts = list(route_pts)
+    for _ in range(3):
+        if len(pts) < 2:
+            break
+        b = pts[-2]
+        a = pts[-1]
+        v1x, v1y = a[0] - b[0], a[1] - b[1]
+        v2x, v2y = p2[0] - a[0], p2[1] - a[1]
+        if (v1x * v2x + v1y * v2y) < 0:
+            pts.pop()
+        else:
+            break
+
+    for _ in range(3):
+        if len(pts) < 2:
+            break
+        a = pts[0]
+        b = pts[1]
+        v1x, v1y = a[0] - p1[0], a[1] - p1[1]
+        v2x, v2y = b[0] - a[0], b[1] - a[1]
+        if (v1x * v2x + v1y * v2y) < 0:
+            pts.pop(0)
+        else:
+            break
+
+    return pts
+
 def interpolate_sea_route(p1, p2):
     try:
         origin = (p1[1], p1[0])
@@ -275,15 +355,24 @@ def interpolate_sea_route(p1, p2):
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
+            # 行き過ぎによる鋭角なV字折り返しをカット
+            res = trim_overshoot(res, p1, p2)
+
+            if not res:
+                return [p1, p2]
+
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
                 res.insert(0, p1)
             else:
                 res[0] = p1
+
             if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
                 res.append(p2)
             else:
                 res[-1] = p2
-            return smooth_line(res, iterations=2)
+
+            # Centripetal Catmull-Rom 3次スプライン曲線で滑らかに補間
+            return catmull_rom_chain(res)
     except Exception:
         pass
     return [p1, p2]
@@ -324,25 +413,12 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
     inferred_route_coords = []
     
     try:
-        route1 = sr.searoute((past_received_pos[1], past_received_pos[0]), (port_pos[1], port_pos[0]))
-        coords1 = route1.get("geometry", {}).get("coordinates", [])
-        if coords1:
-            c1_list = [[round(c[1], 4), round(c[0], 4)] for c in coords1]
-            if abs(c1_list[0][0] - past_received_pos[0]) > 0.001 or abs(c1_list[0][1] - past_received_pos[1]) > 0.001:
-                c1_list.insert(0, past_received_pos)
-            else:
-                c1_list[0] = past_received_pos
+        c1_list = interpolate_sea_route(past_received_pos, port_pos)
+        if c1_list:
             inferred_route_coords.extend(c1_list)
             
-        route2 = sr.searoute((port_pos[1], port_pos[0]), (current_pos[1], current_pos[0]))
-        coords2 = route2.get("geometry", {}).get("coordinates", [])
-        if coords2:
-            c2_list = [[round(c[1], 4), round(c[0], 4)] for c in coords2]
-            if abs(c2_list[-1][0] - current_pos[0]) > 0.001 or abs(c2_list[-1][1] - current_pos[1]) > 0.001:
-                c2_list.append(current_pos)
-            else:
-                c2_list[-1] = current_pos
-                
+        c2_list = interpolate_sea_route(port_pos, current_pos)
+        if c2_list:
             if inferred_route_coords:
                 inferred_route_coords.extend(c2_list[1:])
             else:
@@ -352,16 +428,13 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
         
     if len(inferred_route_coords) < 2:
         return None
-
-    smoothed_inferred = smooth_line(inferred_route_coords, iterations=2)
         
     return {
         "port_name": port_info["name"],
-        "coords": smoothed_inferred
+        "coords": inferred_route_coords
     }
 
 def register_segment_to_grid(p1, p2, mmsi, grid_map, grid_size):
-    """線分(p1-p2)が通過するグリッドにMMSIを登録し、通過グリッド一覧を返す"""
     dist = max(abs(p2[0] - p1[0]), abs(p2[1] - p1[1]))
     steps = max(1, int(dist / (grid_size * 0.5)))
     keys = set()
@@ -468,7 +541,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     routes_output = []
     calculated_headings = {}
     
-    # ★ 赤（日本籍船）とオレンジ（外国籍船）それぞれのグリッド密度マップ（実線＋点線を合算）
     grid_flag_map = defaultdict(set)
     grid_ctrl_map = defaultdict(set)
     GRID_SIZE = 0.08
@@ -561,8 +633,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         sub_sampled.append(raw_coords[-1])
                 else:
                     sub_sampled = raw_coords
-                smoothed = smooth_line(sub_sampled, iterations=2)
-                smoothed = simplify_line(smoothed, tolerance=0.002)
+                smoothed = catmull_rom_chain(sub_sampled)
+                smoothed = simplify_line(smoothed, tolerance=0.0015)
                 if len(smoothed) >= 2:
                     processed_blocks.append(("real", smoothed, None))
             else:
@@ -623,7 +695,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
-    # ★ 赤とオレンジそれぞれの交通量（実線＋点線の重なり）に応じた太さ倍率を付与（点線優先で太く）
     for r in routes_output:
         r_is_flag = (r.get("category") == "日本籍船")
         t_map = grid_flag_map if r_is_flag else grid_ctrl_map
@@ -635,7 +706,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 count = 1
             base_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             if seg.get("is_inferred"):
-                # 点線は重なりがある場合に実線より明確に太くする
                 if count >= 2:
                     w_mult = min(4.0, base_mult * 1.3)
                 else:
