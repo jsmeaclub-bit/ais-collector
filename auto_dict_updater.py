@@ -20,7 +20,6 @@ PORT_GEO_MASTER = [
     {"unloc": "AU PHE", "name": "Port Hedland", "country": "AU", "lat": -20.30, "lng": 118.57, "radius_nm": 15},
     {"unloc": "US LAX", "name": "Los Angeles", "country": "US", "lat": 33.73, "lng": -118.23, "radius_nm": 20},
     {"unloc": "JP YOK", "name": "Yokohama", "country": "JP", "lat": 35.45, "lng": 139.65, "radius_nm": 10},
-    # 頻繁に寄港する港があれば、ここに追加していくことで学習対象が増えます
 ]
 
 def get_spreadsheet_client():
@@ -50,8 +49,8 @@ def main():
 
     # スプレッドシートの辞書を取得
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
-    existing_records = sheet.col_values(1) # A列（変換元）をすべて取得
-    existing_keys = {str(k).strip().upper() for k in existing_records if k} # 重複判定用セット
+    existing_records = sheet.col_values(1)
+    existing_keys = {str(k).strip().upper() for k in existing_records if k}
 
     with open(LATEST_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -65,43 +64,32 @@ def main():
         speed = ship.get("speed", 100)
         dest_str = str(ship.get("destination", "")).strip().upper()
 
-        # 目的地が空欄、または1.0ノット以上（航行中）の船は除外
-        if not dest_str or dest_str in ("-", "", "None") or speed > 1.0:
+        if not dest_str or dest_str in ("-", "", "NONE") or speed > 1.0:
             continue
 
-        # 既に辞書に登録済みの文字列ならスキップ
         if dest_str in existing_keys:
             continue
 
-        # 停泊中の位置が、登録された主要港の範囲内にあるかチェック
         for port in PORT_GEO_MASTER:
             dist = get_distance_nm(lat, lng, port["lat"], port["lng"])
             if dist <= port["radius_nm"]:
-                # マッチした！新しい表記を学習してリストに追加
-                # ★ ここを5列から7列（Lat, Lng追加）に変更
                 new_row = [
-                    dest_str,                # A: 変換元(AIS表記)
-                    port["country"],         # B: 国コード
-                    port["unloc"],           # C: UN/LOCODE
-                    port["name"],            # D: 寄港地名(標準)
-                    "自動学習(位置情報より)",   # E: 備考
-                    port["lat"],             # F: Lat (緯度)
-                    port["lng"]              # G: Lng (経度)
+                    dest_str,
+                    port["country"],
+                    port["unloc"],
+                    port["name"],
+                    "自動学習(位置情報より)",
+                    port["lat"],
+                    port["lng"]
                 ]
                 new_rows.append(new_row)
-                existing_keys.add(dest_str) # 同一処理内での重複を防ぐ
+                existing_keys.add(dest_str)
                 print(f"自動学習: '{dest_str}' は {port['name']} (距離: {round(dist, 1)}海里) と判定しました。")
-                break # 1つの港にマッチしたら次の船へ
+                break
 
-    # スプレッドシートに一括追記
     if new_rows:
         sheet.append_rows(new_rows)
         print(f"{len(new_rows)} 件の新しい辞書データをスプレッドシートに追加しました。")
-    else:
-        print("新しく学習する辞書データはありませんでした。")
-
-if __name__ == "__main__":
-    main()
     else:
         print("新しく学習する辞書データはありませんでした。")
 
