@@ -37,6 +37,9 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
+# 位置飛び補完（点線化）を発動する閾値（度）：0.60度 ≒ 約36海里
+GAP_THRESHOLD_DEG = 0.60
+
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
     sa_info = json.loads(GCP_SA_KEY)
@@ -276,6 +279,13 @@ def interpolate_sea_route(p1, p2):
     return None
 
 def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
+    """
+    過去の履歴から仕向地の変更を検知し、寄港推測ルートを生成する。
+    ★重複除外：すでに実測の軌跡が対象港の近く（0.35度以内）を通過している場合は推測ルートを引かない。
+    """
+    if not current_pos:
+        return None
+        
     reversed_history = list(reversed(ship_history))
     past_received_pos = None
     past_dest_str = None
@@ -300,6 +310,12 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
         return None
         
     port_pos = [port_info["lat"], port_info["lng"]]
+
+    # ★ 重複チェック：最近の履歴（直近30点）で既に対象港の半径0.35度以内に実測データがあるならスキップ
+    for _, pt, _, _ in reversed_history[:30]:
+        if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35:
+            return None
+
     inferred_route_coords = []
     
     try:
@@ -367,7 +383,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     tracks_map = defaultdict(list)
     
     if os.path.exists(history_dir):
-        for file in os.listdir(history_dir):
+        for file in sorted(os.listdir(history_dir)):
             if not (file.endswith('.csv') or file.endswith('.csv.gz')):
                 continue
             
@@ -425,6 +441,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     for mmsi, data_list in tracks_map.items():
         if not data_list: continue
+        # 1. まず過去ログのみを確実に時系列ソート
         data_list.sort(key=lambda x: (x[0], x[2]))
         
         cleaned_list = []
@@ -432,40 +449,38 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if not cleaned_list or cleaned_list[-1][1] != item[1]:
                 cleaned_list.append((item[0], item[1]))
                 
+        # 2. ソート完了後に、必ず「現在地（latest_coord）」をリストの最後尾に追加する（順序逆転の完全防止）
         latest_coord = None
         if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
             curr_lat = existing_latest[mmsi]["lat"]
             curr_lng = existing_latest[mmsi]["lng"]
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-            # ★ 修正: 現在地を履歴の最後に加えることで、直前の位置との距離判定（0.25度以上離れているか）を確実に実行させる
             if not cleaned_list or cleaned_list[-1][1] != latest_coord:
-                cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
+                cleaned_list.append((datetime.max, latest_coord))
 
-        # existing_latest の情報を更新する（最新の位置を確保するため）
-        if cleaned_list:
+        if cleaned_list and mmsi not in existing_latest:
             last_t, last_p = cleaned_list[-1]
             m_info = master_map.get(mmsi, {})
-            # 最新の座標が existing_latest に無い場合は追加
-            if mmsi not in existing_latest:
-                existing_latest[mmsi] = {
-                    "mmsi": mmsi,
-                    "name": m_info.get("name") or f"MMSI:{mmsi}",
-                    "imo": m_info.get("imo", "-"),
-                    "category": m_info.get("category", "日本船社運航船"),
-                    "flag": m_info.get("flag", "-"),
-                    "type": m_info.get("type", "-"),
-                    "gt": m_info.get("gt", "-"),
-                    "owner": m_info.get("owner", "-"),
-                    "operator": m_info.get("operator", "-"),
-                    "survey": m_info.get("survey", "-"),
-                    "lat": last_p[0],
-                    "lng": last_p[1],
-                    "speed": 0.0,
-                    "heading": 0.0,
-                    "destination": "-",
-                    "eta": "-",
-                    "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t != datetime.min else ""
-                }
+            existing_latest[mmsi] = {
+                "mmsi": mmsi,
+                "name": m_info.get("name") or f"MMSI:{mmsi}",
+                "imo": m_info.get("imo", "-"),
+                "category": m_info.get("category", "日本船社運航船"),
+                "flag": m_info.get("flag", "-"),
+                "type": m_info.get("type", "-"),
+                "gt": m_info.get("gt", "-"),
+                "owner": m_info.get("owner", "-"),
+                "operator": m_info.get("operator", "-"),
+                "survey": m_info.get("survey", "-"),
+                "lat": last_p[0],
+                "lng": last_p[1],
+                "speed": 0.0,
+                "heading": 0.0,
+                "destination": "-",
+                "eta": "-",
+                "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t not in (datetime.min, datetime.max) else ""
+            }
+            latest_coord = last_p
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
@@ -474,23 +489,20 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         curr_sub = [cleaned_list[0][1]]
         inferred_segments = []
 
-        # すべての点（最新の現在地を含む）をループして距離判定を行う
+        # 3. すべての区間（現在地への最終区間を含む）で閾値（GAP_THRESHOLD_DEG = 0.60度）を判定
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p = cleaned_list[i-1]
             curr_t, curr_p = cleaned_list[i]
             dlat = abs(curr_p[0] - prev_p[0])
             dlng = abs(curr_p[1] - prev_p[1])
             
-            # 位置飛び判定（0.25度以上離れている場合）
-            if dlat > 0.25 or dlng > 0.25:
-                # 離れている場合は実測ルートを一旦区切る
+            if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
                 if len(curr_sub) >= 2:
                     real_sub_lines.append(curr_sub)
                 elif len(curr_sub) == 1 and real_sub_lines:
                     real_sub_lines[-1].append(curr_sub[0])
                 
                 interpolated = interpolate_sea_route(prev_p, curr_p)
-                # 補完ルート（is_inferred: True で点線扱い）
                 if interpolated and len(interpolated) >= 2:
                     inferred_segments.append({
                         "coords": interpolated,
@@ -504,21 +516,25 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         "is_inferred": True
                     })
                 
-                # 新しい実測ルートをここから開始
                 curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
 
-        # 最後の実測ルートを保存
         if len(curr_sub) >= 2:
             real_sub_lines.append(curr_sub)
         elif len(curr_sub) == 1 and real_sub_lines:
             real_sub_lines[-1].append(curr_sub[0])
 
+        # 進行方向（Heading）の計算：最後の実測ライン、なければ最後の点線ラインの末尾2点から算出
         heading = 0.0
         if len(real_sub_lines) > 0 and len(real_sub_lines[-1]) >= 2:
             p_prev = real_sub_lines[-1][-2]
             p_last = real_sub_lines[-1][-1]
+            heading = calculate_bearing(p_prev, p_last)
+            calculated_headings[mmsi] = heading
+        elif len(inferred_segments) > 0 and len(inferred_segments[-1]["coords"]) >= 2:
+            p_prev = inferred_segments[-1]["coords"][-2]
+            p_last = inferred_segments[-1]["coords"][-1]
             heading = calculate_bearing(p_prev, p_last)
             calculated_headings[mmsi] = heading
 
@@ -554,7 +570,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
                     current_seg_idx += 1
 
-        # 点線の補完ルートを合流
         segments.extend(inferred_segments)
 
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
