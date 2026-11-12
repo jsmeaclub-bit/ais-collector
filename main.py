@@ -176,6 +176,8 @@ async def process_message_queue(queue, target_mmsis, received):
                     received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
                     received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
                     received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
+                    if data.get("MetaData", {}).get("time_utc"):
+                        received[mmsi]["timestamp"] = data.get("MetaData", {}).get("time_utc")
                 elif msg_type == "ShipStaticData":
                     static = data.get("Message", {}).get("ShipStaticData", {})
                     if dest := static.get("Destination", "").strip():
@@ -293,7 +295,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                     
                     c_ts, c_mmsi, c_lat, c_lng = 0, 1, 2, 3
                     
-                    # 実際のヘッダー行から列の位置を自動特定
                     for i, col_name in enumerate(header):
                         c_name = col_name.strip().lower()
                         if "lat" in c_name or "緯度" in c_name: c_lat = i
@@ -304,12 +305,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                     for idx, row in enumerate(reader):
                         if len(row) < 4: continue
                         
-                        # ★ スプレッドシート由来の旧フォーマットとPython追記の新フォーマットの混在対策
                         if len(row) == 6:
-                            # Pythonが追記した新フォーマット [Timestamp, MMSI, Lat, Lng, Speed, Heading]
                             r_ts, r_mmsi, r_lat, r_lng = row[0], row[1], row[2], row[3]
                         elif len(row) > max(c_lat, c_lng, c_mmsi, c_ts):
-                            # スプレッドシートから移行した旧フォーマット
                             r_ts, r_mmsi, r_lat, r_lng = row[c_ts], row[c_mmsi], row[c_lat], row[c_lng]
                         else:
                             continue
@@ -317,15 +315,19 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                         mmsi_str = str(r_mmsi).strip().split(".")[0]
                         if mmsi_str not in master_map: continue
                         try:
+                            lat_val = float(r_lat)
+                            lng_val = float(r_lng)
+                            if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0):
+                                continue
                             ts = robust_parse_timestamp(r_ts)
-                            pt = [round(float(r_lat), 4), round(float(r_lng), 4)]
+                            pt = [round(lat_val, 4), round(lng_val, 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx))
                         except Exception: 
                             continue
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
 
-    # 3. 航跡データの生成と進行方向(Heading)の計算
+    # 3. 航跡データの生成と進行方向(Heading)の計算・現在位置(△)との同期
     routes_output = []
     calculated_headings = {}
     grid_mmsi_map = defaultdict(set)
@@ -341,13 +343,36 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest):
                 cleaned_list.append((item[0], item[1]))
                 
         latest_coord = None
-        if mmsi in existing_latest:
-            curr_lat = existing_latest[mmsi].get("lat")
-            curr_lng = existing_latest[mmsi].get("lng")
-            if curr_lat is not None and curr_lng is not None:
-                latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-                if not cleaned_list or cleaned_list[-1][1] != latest_coord:
-                    cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
+        if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
+            curr_lat = existing_latest[mmsi]["lat"]
+            curr_lng = existing_latest[mmsi]["lng"]
+            latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
+            if not cleaned_list or cleaned_list[-1][1] != latest_coord:
+                cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
+        elif cleaned_list:
+            # 履歴にのみ存在し latest_2026.json に欠けている船の現在位置(△)を補完
+            last_t, last_p = cleaned_list[-1]
+            m_info = master_map.get(mmsi, {})
+            existing_latest[mmsi] = {
+                "mmsi": mmsi,
+                "name": m_info.get("name") or f"MMSI:{mmsi}",
+                "imo": m_info.get("imo", "-"),
+                "category": m_info.get("category", "日本船社運航船"),
+                "flag": m_info.get("flag", "-"),
+                "type": m_info.get("type", "-"),
+                "gt": m_info.get("gt", "-"),
+                "owner": m_info.get("owner", "-"),
+                "operator": m_info.get("operator", "-"),
+                "survey": m_info.get("survey", "-"),
+                "lat": last_p[0],
+                "lng": last_p[1],
+                "speed": 0.0,
+                "heading": 0.0,
+                "destination": "-",
+                "eta": "-",
+                "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t != datetime.min else ""
+            }
+            latest_coord = last_p
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
@@ -506,7 +531,7 @@ def main():
             with open(LATEST_FILE, "r", encoding="utf-8") as f:
                 for s in json.load(f).get("latest", []):
                     m_key = str(s.get("mmsi", "")).strip().split(".")[0]
-                    if m_key and m_key in master_map:
+                    if m_key and m_key in master_map and s.get("lat") is not None and s.get("lng") is not None:
                         existing_latest[m_key] = s
         except Exception: pass
 
@@ -517,9 +542,20 @@ def main():
     for mmsi, ship in live_ships.items():
         if mmsi not in master_map: continue
         m_info = master_map.get(mmsi, {})
+        prev = existing_latest.get(mmsi, {})
+        
+        # ShipStaticDataのみ受信時(lat/lngがNone)に既存座標を消さないよう保護
+        new_lat = ship["lat"] if ship["lat"] is not None else prev.get("lat")
+        new_lng = ship["lng"] if ship["lng"] is not None else prev.get("lng")
+        if new_lat is None or new_lng is None:
+            continue
+
+        new_speed = ship["speed"] if ship["lat"] is not None else prev.get("speed", 0.0)
+        new_ts = ship["timestamp"] if (ship["lat"] is not None and ship.get("timestamp")) else prev.get("timestamp", ship.get("timestamp"))
+
         existing_latest[mmsi] = {
             "mmsi": mmsi,
-            "name": m_info.get("name") or ship["name"] or f"MMSI:{mmsi}",
+            "name": m_info.get("name") or ship["name"] or prev.get("name") or f"MMSI:{mmsi}",
             "imo": m_info.get("imo", "-"),
             "category": m_info.get("category", "日本船社運航船"),
             "flag": m_info.get("flag", "-"),
@@ -528,13 +564,13 @@ def main():
             "owner": m_info.get("owner", "-"),
             "operator": m_info.get("operator", "-"),
             "survey": m_info.get("survey", "-"),
-            "lat": ship["lat"],
-            "lng": ship["lng"],
-            "speed": ship["speed"],
-            "heading": existing_latest.get(mmsi, {}).get("heading", 0.0),
-            "destination": ship["destination"] or existing_latest.get(mmsi, {}).get("destination", "-"),
-            "eta": ship["eta"] or existing_latest.get(mmsi, {}).get("eta", "-"),
-            "timestamp": ship["timestamp"]
+            "lat": new_lat,
+            "lng": new_lng,
+            "speed": new_speed,
+            "heading": prev.get("heading", 0.0),
+            "destination": ship["destination"] or prev.get("destination", "-"),
+            "eta": ship["eta"] or prev.get("eta", "-"),
+            "timestamp": new_ts
         }
 
     for mmsi, ship_data in existing_latest.items():
@@ -551,8 +587,8 @@ def main():
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
 
-    update_coverage_from_all_latest(existing_latest)
     update_history_and_generate_tracks(live_ships, master_map, existing_latest)
+    update_coverage_from_all_latest(existing_latest)
     
     recent_count = len([mmsi for mmsi, ship in live_ships.items() if ship.get("lat") is not None and ship.get("lng") is not None])
 
