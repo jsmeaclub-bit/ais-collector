@@ -437,32 +437,35 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             curr_lat = existing_latest[mmsi]["lat"]
             curr_lng = existing_latest[mmsi]["lng"]
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-            # 現在地を履歴の末尾に追加する（これで通常の距離判定ループに乗る）
+            # ★ 修正: 現在地を履歴の最後に加えることで、直前の位置との距離判定（0.25度以上離れているか）を確実に実行させる
             if not cleaned_list or cleaned_list[-1][1] != latest_coord:
                 cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
-        elif cleaned_list:
+
+        # existing_latest の情報を更新する（最新の位置を確保するため）
+        if cleaned_list:
             last_t, last_p = cleaned_list[-1]
             m_info = master_map.get(mmsi, {})
-            existing_latest[mmsi] = {
-                "mmsi": mmsi,
-                "name": m_info.get("name") or f"MMSI:{mmsi}",
-                "imo": m_info.get("imo", "-"),
-                "category": m_info.get("category", "日本船社運航船"),
-                "flag": m_info.get("flag", "-"),
-                "type": m_info.get("type", "-"),
-                "gt": m_info.get("gt", "-"),
-                "owner": m_info.get("owner", "-"),
-                "operator": m_info.get("operator", "-"),
-                "survey": m_info.get("survey", "-"),
-                "lat": last_p[0],
-                "lng": last_p[1],
-                "speed": 0.0,
-                "heading": 0.0,
-                "destination": "-",
-                "eta": "-",
-                "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t != datetime.min else ""
-            }
-            latest_coord = last_p
+            # 最新の座標が existing_latest に無い場合は追加
+            if mmsi not in existing_latest:
+                existing_latest[mmsi] = {
+                    "mmsi": mmsi,
+                    "name": m_info.get("name") or f"MMSI:{mmsi}",
+                    "imo": m_info.get("imo", "-"),
+                    "category": m_info.get("category", "日本船社運航船"),
+                    "flag": m_info.get("flag", "-"),
+                    "type": m_info.get("type", "-"),
+                    "gt": m_info.get("gt", "-"),
+                    "owner": m_info.get("owner", "-"),
+                    "operator": m_info.get("operator", "-"),
+                    "survey": m_info.get("survey", "-"),
+                    "lat": last_p[0],
+                    "lng": last_p[1],
+                    "speed": 0.0,
+                    "heading": 0.0,
+                    "destination": "-",
+                    "eta": "-",
+                    "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t != datetime.min else ""
+                }
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
@@ -471,6 +474,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         curr_sub = [cleaned_list[0][1]]
         inferred_segments = []
 
+        # すべての点（最新の現在地を含む）をループして距離判定を行う
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p = cleaned_list[i-1]
             curr_t, curr_p = cleaned_list[i]
@@ -479,7 +483,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             # 位置飛び判定（0.25度以上離れている場合）
             if dlat > 0.25 or dlng > 0.25:
-                # ここまでの実測ルートを保存
+                # 離れている場合は実測ルートを一旦区切る
                 if len(curr_sub) >= 2:
                     real_sub_lines.append(curr_sub)
                 elif len(curr_sub) == 1 and real_sub_lines:
@@ -510,8 +514,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             real_sub_lines.append(curr_sub)
         elif len(curr_sub) == 1 and real_sub_lines:
             real_sub_lines[-1].append(curr_sub[0])
-
-        # ★【重要】ここに残っていた強制上書きコード（real_sub_lines[-1][-1] = latest_coord）を完全に削除しました★
 
         heading = 0.0
         if len(real_sub_lines) > 0 and len(real_sub_lines[-1]) >= 2:
