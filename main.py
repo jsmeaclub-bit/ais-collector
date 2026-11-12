@@ -437,6 +437,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             curr_lat = existing_latest[mmsi]["lat"]
             curr_lng = existing_latest[mmsi]["lng"]
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
+            # 現在地を履歴の末尾に追加する（これで通常の距離判定ループに乗る）
             if not cleaned_list or cleaned_list[-1][1] != latest_coord:
                 cleaned_list.append((datetime.now(timezone.utc).replace(tzinfo=None), latest_coord))
         elif cleaned_list:
@@ -478,13 +479,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             # 位置飛び判定（0.25度以上離れている場合）
             if dlat > 0.25 or dlng > 0.25:
+                # ここまでの実測ルートを保存
                 if len(curr_sub) >= 2:
                     real_sub_lines.append(curr_sub)
                 elif len(curr_sub) == 1 and real_sub_lines:
                     real_sub_lines[-1].append(curr_sub[0])
                 
                 interpolated = interpolate_sea_route(prev_p, curr_p)
-                # ★ 変更点：点線が確実に描画されるよう、細切れにせず1本の経路として追加
+                # 補完ルート（is_inferred: True で点線扱い）
                 if interpolated and len(interpolated) >= 2:
                     inferred_segments.append({
                         "coords": interpolated,
@@ -498,14 +500,18 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         "is_inferred": True
                     })
                 
+                # 新しい実測ルートをここから開始
                 curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
 
+        # 最後の実測ルートを保存
         if len(curr_sub) >= 2:
             real_sub_lines.append(curr_sub)
         elif len(curr_sub) == 1 and real_sub_lines:
             real_sub_lines[-1].append(curr_sub[0])
+
+        # ★【重要】ここに残っていた強制上書きコード（real_sub_lines[-1][-1] = latest_coord）を完全に削除しました★
 
         heading = 0.0
         if len(real_sub_lines) > 0 and len(real_sub_lines[-1]) >= 2:
@@ -546,6 +552,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     segments.append({"coords": [p1, p2], "opacity": opacity, "g_key": g_key})
                     current_seg_idx += 1
 
+        # 点線の補完ルートを合流
         segments.extend(inferred_segments)
 
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
@@ -553,7 +560,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         
         if inferred_route:
             inf_coords = inferred_route["coords"]
-            # ★ 変更点：寄港推測ルートも細切れにせず1本の経路として追加
             if len(inf_coords) >= 2:
                 segments.append({
                     "coords": inf_coords,
