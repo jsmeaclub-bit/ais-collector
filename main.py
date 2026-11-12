@@ -268,10 +268,6 @@ def simplify_line(coords, tolerance=0.002):
         return coords
 
 def interpolate_sea_route(p1, p2):
-    """
-    2点間を主要航路(searoute)で補完し、始点(p1)および終点(p2=現在の船の位置等)と
-    隙間なく接続したうえで、スプライン曲線化(smooth_line)して返す。
-    """
     try:
         origin = (p1[1], p1[0])
         destination = (p2[1], p2[0])
@@ -279,29 +275,20 @@ def interpolate_sea_route(p1, p2):
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            
-            # 始点(p1)とsearouteの最初の点を正確に繋ぐ
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
                 res.insert(0, p1)
             else:
                 res[0] = p1
-                
-            # 終点(p2=現在地)とsearouteの最後の点を正確に繋ぐ
             if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
                 res.append(p2)
             else:
                 res[-1] = p2
-                
-            # スプライン曲線化（チャイキンアルゴリズム）で滑らかに結ぶ
             return smooth_line(res, iterations=2)
     except Exception:
         pass
     return [p1, p2]
 
 def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
-    """
-    過去の履歴から仕向地の変更を検知し、寄港推測ルートを生成する。
-    """
     if not current_pos:
         return None
         
@@ -366,13 +353,26 @@ def generate_inferred_port_route(ship_history, current_pos, current_dest, port_d
     if len(inferred_route_coords) < 2:
         return None
 
-    # 寄港推測ルート全体もスプライン曲線で滑らかに接続
     smoothed_inferred = smooth_line(inferred_route_coords, iterations=2)
         
     return {
         "port_name": port_info["name"],
         "coords": smoothed_inferred
     }
+
+def register_segment_to_grid(p1, p2, mmsi, grid_map, grid_size):
+    """線分(p1-p2)が通過するグリッドにMMSIを登録し、通過グリッド一覧を返す"""
+    dist = max(abs(p2[0] - p1[0]), abs(p2[1] - p1[1]))
+    steps = max(1, int(dist / (grid_size * 0.5)))
+    keys = set()
+    for s in range(steps + 1):
+        t = s / float(steps)
+        lat = p1[0] + (p2[0] - p1[0]) * t
+        lng = p1[1] + (p2[1] - p1[1]) * t
+        gk = (round(lat / grid_size), round(lng / grid_size))
+        grid_map[gk].add(mmsi)
+        keys.add(gk)
+    return list(keys)
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict):
     now_utc = datetime.now(timezone.utc)
@@ -467,7 +467,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     routes_output = []
     calculated_headings = {}
-    grid_mmsi_map = defaultdict(set)
+    
+    # ★ 赤（日本籍船）とオレンジ（外国籍船）それぞれのグリッド密度マップ（実線＋点線を合算）
+    grid_flag_map = defaultdict(set)
+    grid_ctrl_map = defaultdict(set)
     GRID_SIZE = 0.08
 
     for mmsi, data_list in tracks_map.items():
@@ -513,9 +516,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
+        is_flag = (category == "日本籍船")
+        target_grid_map = grid_flag_map if is_flag else grid_ctrl_map
 
-        # 時系列順に実測ブロックと補完ブロックを並べるためのリスト
-        # 要素: (kind, coords, port_name)  kindは "real" または "inferred"
         ordered_blocks = []
         curr_sub = [cleaned_list[0][1]]
 
@@ -529,7 +532,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if len(curr_sub) >= 2:
                     ordered_blocks.append(("real", curr_sub, None))
                 
-                # 過去点(prev_p)から現在点(curr_p)までをスプライン曲線化された主要航路で補完
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
                     ordered_blocks.append(("inferred", interpolated, None))
@@ -541,7 +543,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if len(curr_sub) >= 2:
             ordered_blocks.append(("real", curr_sub, None))
 
-        # 寄港推測ルートがある場合は末尾（現在地側）に追加
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
@@ -550,7 +551,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if not ordered_blocks:
             continue
 
-        # 各ブロックをセグメント化し、計測開始点から現在地まで一貫して濃度が上がるように準備
         processed_blocks = []
         for kind, raw_coords, port_name in ordered_blocks:
             if kind == "real":
@@ -566,34 +566,27 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if len(smoothed) >= 2:
                     processed_blocks.append(("real", smoothed, None))
             else:
-                # 補完ルートはすでに smooth_line 済み
                 if len(raw_coords) >= 2:
                     processed_blocks.append(("inferred", raw_coords, port_name))
 
         if not processed_blocks:
             continue
 
-        # 進行方向（Heading）の計算：時系列の最後のブロックの末尾2点から算出
         last_coords = processed_blocks[-1][1]
         heading = calculate_bearing(last_coords[-2], last_coords[-1])
         calculated_headings[mmsi] = heading
 
-        # 全ブロックをセグメント配列に展開（点線は破線が潰れないチャンク単位で分割しグラデーション化）
         segments = []
         for kind, coords, port_name in processed_blocks:
             if kind == "real":
                 for i in range(len(coords) - 1):
                     p1, p2 = coords[i], coords[i+1]
-                    mid_lat = (p1[0] + p2[0]) / 2.0
-                    mid_lng = (p1[1] + p2[1]) / 2.0
-                    g_key = (round(mid_lat / GRID_SIZE), round(mid_lng / GRID_SIZE))
-                    grid_mmsi_map[g_key].add(mmsi)
+                    g_keys = register_segment_to_grid(p1, p2, mmsi, target_grid_map, GRID_SIZE)
                     segments.append({
                         "coords": [p1, p2],
-                        "g_key": g_key
+                        "g_keys": g_keys
                     })
             else:
-                # 点線用チャンク分割（1チャンク最低6点以上を確保しつつ最大12段階のグラデーションに分割）
                 n_pts = len(coords)
                 num_chunks = min(12, max(1, (n_pts - 1) // 6))
                 chunk_size = (n_pts - 1) / float(num_chunks)
@@ -604,15 +597,19 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         e_i = min(n_pts - 1, s_i + 1)
                     sub_chunk = coords[s_i : e_i + 1]
                     if len(sub_chunk) >= 2:
+                        chunk_g_keys = set()
+                        for k in range(len(sub_chunk) - 1):
+                            gks = register_segment_to_grid(sub_chunk[k], sub_chunk[k+1], mmsi, target_grid_map, GRID_SIZE)
+                            chunk_g_keys.update(gks)
                         seg_obj = {
                             "coords": sub_chunk,
-                            "is_inferred": True
+                            "is_inferred": True,
+                            "g_keys": list(chunk_g_keys)
                         }
                         if port_name:
                             seg_obj["port_name"] = port_name
                         segments.append(seg_obj)
 
-        # 計測期間の開始点(0.15)から現在地(0.95)に向かって濃度(opacity)を一貫して上昇させる
         total_segs = len(segments)
         for idx, seg in enumerate(segments):
             ratio = idx / max(1, total_segs - 1)
@@ -626,12 +623,25 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "segments": segments
             })
 
+    # ★ 赤とオレンジそれぞれの交通量（実線＋点線の重なり）に応じた太さ倍率を付与（点線優先で太く）
     for r in routes_output:
+        r_is_flag = (r.get("category") == "日本籍船")
+        t_map = grid_flag_map if r_is_flag else grid_ctrl_map
         for seg in r["segments"]:
-            if seg.get("is_inferred"): continue
-            g_key = seg.pop("g_key", None)
-            count = len(grid_mmsi_map.get(g_key, set()))
-            w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
+            g_keys = seg.pop("g_keys", [])
+            if g_keys:
+                count = max(len(t_map.get(gk, set())) for gk in g_keys)
+            else:
+                count = 1
+            base_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
+            if seg.get("is_inferred"):
+                # 点線は重なりがある場合に実線より明確に太くする
+                if count >= 2:
+                    w_mult = min(4.0, base_mult * 1.3)
+                else:
+                    w_mult = 1.15
+            else:
+                w_mult = base_mult
             seg["weight_multiplier"] = round(w_mult, 2)
 
     for mmsi, ship in existing_latest.items():
