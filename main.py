@@ -335,40 +335,40 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
             if not res: return [p1, p2]
 
             if not is_port_route:
+                # ★ プロットAからプロットBの距離(lane_span)の判定を復活
+                # 端点(p1, p2)を除いた純粋なネットワークノード群を取得
+                lane_nodes = [
+                    c for c in res 
+                    if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
+                ]
+
+                if len(lane_nodes) <= 1:
+                    return [p1, p2]
+
+                lane_span = 0.0
+                for i in range(len(lane_nodes) - 1):
+                    lane_span += math.hypot(lane_nodes[i+1][0] - lane_nodes[i][0], lane_nodes[i+1][1] - lane_nodes[i][1])
+                
+                # スナップ後の主要航路移動距離が極端に短い場合は点スパイクとして確実に排除
+                if lane_span < 0.05:
+                    return [p1, p2]
+
+                # ★ 速度判定（最強のD字スパイク排除フィルター）
                 route_dist = 0.0
                 for i in range(len(res) - 1):
                     route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
                 
-                # 最強判定：船の速度限界チェック
                 if time_diff_hrs and time_diff_hrs > 0:
                     speed_knots = (route_dist * 60.0) / time_diff_hrs
                     max_allowed_speed = max(prev_speed + 5.0, 15.0)
                     if speed_knots > max_allowed_speed:
                         return [p1, p2]
 
-                # バックネット1：長時間の途絶時用、単なる長距離大回りの排除
+                # 長期間データ欠損時のバックアップ判定
                 if route_dist > (straight_dist * 2.5) and (route_dist - straight_dist) > 0.5:
                     return [p1, p2]
                 
-                # ★ バックネット2：D字スパイク（横への異常な膨らみ）の幾何学的排除
-                if straight_dist > 0:
-                    max_lat_dev = 0.0
-                    # 直線 p1-p2 の方程式: Ax + By + C = 0
-                    A = p2[1] - p1[1]
-                    B = p1[0] - p2[0]
-                    C = p2[0] * p1[1] - p1[0] * p2[1]
-                    
-                    for node in res:
-                        # 直線からの垂直距離を計算
-                        dev = abs(A * node[0] + B * node[1] + C) / straight_dist
-                        if dev > max_lat_dev:
-                            max_lat_dev = dev
-                    
-                    # 直線距離に対して、横への膨らみが80%以上かつ約55km以上ある場合は、
-                    # 陸地回避としてはあり得ないほどいびつなD字ルートと判定し破棄。
-                    # （※直角に曲がる通常の半島迂回でも膨らみは50%程度に収まるため安全）
-                    if max_lat_dev > max(0.5, straight_dist * 0.8):
-                        return [p1, p2]
+                # ※陸切りを引き起こした幾何学的な膨らみ(max_lat_dev)判定は削除しました。
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
