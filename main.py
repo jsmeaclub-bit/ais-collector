@@ -318,7 +318,7 @@ def trim_overshoot(route_pts, p1, p2):
         else: break
     return pts
 
-def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False):
+def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     if straight_dist < 0.15:
         return [p1, p2]
@@ -334,18 +334,41 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
-            # ★ ご提案の速度チェック一本化
-            # ポートルート（推測線）以外の通常のAIS補間において、
-            # searouteが引いたルート距離を所要時間で割り、物理的な限界速度(25ノット)を超える場合は即スパイクとして破棄。
-            # 不要な幾何学フィルター（サブノードや距離倍率）はすべて削除しました。
-            if not is_port_route and time_diff_hrs and time_diff_hrs > 0:
+            if not is_port_route:
                 route_dist = 0.0
                 for i in range(len(res) - 1):
                     route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
                 
-                speed_knots = (route_dist * 60.0) / time_diff_hrs
-                if speed_knots > 25.0:
+                # 最強判定：船の速度限界チェック
+                if time_diff_hrs and time_diff_hrs > 0:
+                    speed_knots = (route_dist * 60.0) / time_diff_hrs
+                    max_allowed_speed = max(prev_speed + 5.0, 15.0)
+                    if speed_knots > max_allowed_speed:
+                        return [p1, p2]
+
+                # バックネット1：長時間の途絶時用、単なる長距離大回りの排除
+                if route_dist > (straight_dist * 2.5) and (route_dist - straight_dist) > 0.5:
                     return [p1, p2]
+                
+                # ★ バックネット2：D字スパイク（横への異常な膨らみ）の幾何学的排除
+                if straight_dist > 0:
+                    max_lat_dev = 0.0
+                    # 直線 p1-p2 の方程式: Ax + By + C = 0
+                    A = p2[1] - p1[1]
+                    B = p1[0] - p2[0]
+                    C = p2[0] * p1[1] - p1[0] * p2[1]
+                    
+                    for node in res:
+                        # 直線からの垂直距離を計算
+                        dev = abs(A * node[0] + B * node[1] + C) / straight_dist
+                        if dev > max_lat_dev:
+                            max_lat_dev = dev
+                    
+                    # 直線距離に対して、横への膨らみが80%以上かつ約55km以上ある場合は、
+                    # 陸地回避としてはあり得ないほどいびつなD字ルートと判定し破棄。
+                    # （※直角に曲がる通常の半島迂回でも膨らみは50%程度に収まるため安全）
+                    if max_lat_dev > max(0.5, straight_dist * 0.8):
+                        return [p1, p2]
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
@@ -367,7 +390,7 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     current_dest_upper = str(current_dest).strip().upper()
     if not current_dest_upper or current_dest_upper in ("-", "", "NONE"): return None
     
-    for ts, pt, idx, r_dest in reversed_history:
+    for ts, pt, idx, r_dest, r_spd in reversed_history:
         if not r_dest or r_dest in ("-", "", "NONE"): continue
         if r_dest != current_dest_upper:
             past_dest_str = r_dest
@@ -396,7 +419,7 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     if req_speed > 22.0:
         return None
 
-    for _, pt, _, _ in reversed_history:
+    for _, pt, _, _, _ in reversed_history:
         if math.hypot(pt[0] - port_pos[0], pt[1] - port_pos[1]) < 4.0:
             return None
         
@@ -466,22 +489,29 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     reader = csv.reader(f)
                     header = next(reader, None)
                     if not header: continue
-                    c_ts, c_mmsi, c_lat, c_lng = 0, 1, 2, 3
+                    c_ts, c_mmsi, c_lat, c_lng, c_spd = 0, 1, 2, 3, 4
                     for i, col_name in enumerate(header):
                         c_name = col_name.strip().lower()
                         if "lat" in c_name or "緯度" in c_name: c_lat = i
                         elif "lon" in c_name or "lng" in c_name or "経度" in c_name: c_lng = i
                         elif "mmsi" in c_name: c_mmsi = i
                         elif "time" in c_name or "date" in c_name or "timestamp" in c_name or "日付" in c_name: c_ts = i
+                        elif "speed" in c_name or "sog" in c_name or "速力" in c_name: c_spd = i
 
                     for idx, row in enumerate(reader):
                         if len(row) < 4: continue
                         r_dest = ""
+                        r_spd = 0.0
                         if len(row) == 6 or len(row) == 8:
                             r_ts, r_mmsi, r_lat, r_lng = row[0], row[1], row[2], row[3]
+                            try: r_spd = float(row[4])
+                            except Exception: pass
                             if len(row) == 8: r_dest = str(row[6]).strip().upper()
                         elif len(row) > max(c_lat, c_lng, c_mmsi, c_ts):
                             r_ts, r_mmsi, r_lat, r_lng = row[c_ts], row[c_mmsi], row[c_lat], row[c_lng]
+                            try:
+                                if len(row) > c_spd: r_spd = float(row[c_spd])
+                            except Exception: pass
                             if len(row) > 6: r_dest = str(row[6]).strip().upper()
                         else: continue
 
@@ -494,7 +524,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                             ts = robust_parse_timestamp(r_ts)
                             if ts == datetime.min: continue
                             pt = [round(lat_val, 4), round(lng_val, 4)]
-                            tracks_map[mmsi_str].append((ts, pt, idx, r_dest))
+                            tracks_map[mmsi_str].append((ts, pt, idx, r_dest, r_spd))
                         except Exception: continue
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
@@ -511,11 +541,11 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         cleaned_list = []
         for item in data_list:
             if not cleaned_list:
-                cleaned_list.append((item[0], item[1]))
+                cleaned_list.append((item[0], item[1], item[4]))
                 continue
             
-            last_ts, last_pt = cleaned_list[-1]
-            curr_ts, curr_pt = item[0], item[1]
+            last_ts, last_pt, last_s = cleaned_list[-1]
+            curr_ts, curr_pt, curr_s = item[0], item[1], item[4]
             
             if curr_pt == last_pt:
                 continue
@@ -527,27 +557,28 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if speed > 50.0:
                     continue
             
-            cleaned_list.append((curr_ts, curr_pt))
+            cleaned_list.append((curr_ts, curr_pt, curr_s))
                 
         latest_coord = None
         if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
             curr_lat = existing_latest[mmsi]["lat"]
             curr_lng = existing_latest[mmsi]["lng"]
+            curr_spd = existing_latest[mmsi].get("speed", 0.0)
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
             if not cleaned_list or cleaned_list[-1][1] != latest_coord:
                 if cleaned_list:
-                    last_ts, last_pt = cleaned_list[-1]
+                    last_ts, last_pt, last_s = cleaned_list[-1]
                     now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
                     time_diff_hrs = (now_ts - last_ts).total_seconds() / 3600.0
                     if time_diff_hrs > 0:
                         dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
                         if (dist_nm / time_diff_hrs) <= 50.0:
-                            cleaned_list.append((datetime.max, latest_coord))
+                            cleaned_list.append((datetime.max, latest_coord, curr_spd))
                 else:
-                    cleaned_list.append((datetime.max, latest_coord))
+                    cleaned_list.append((datetime.max, latest_coord, curr_spd))
 
         if cleaned_list and mmsi not in existing_latest:
-            last_t, last_p = cleaned_list[-1]
+            last_t, last_p, last_s = cleaned_list[-1]
             m_info = master_map.get(mmsi, {})
             existing_latest[mmsi] = {
                 "mmsi": mmsi,
@@ -562,7 +593,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "survey": m_info.get("survey", "-"),
                 "lat": last_p[0],
                 "lng": last_p[1],
-                "speed": 0.0,
+                "speed": last_s,
                 "heading": 0.0,
                 "destination": "-",
                 "eta": "-",
@@ -571,7 +602,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             latest_coord = last_p
             
         raw_points = []
-        for ts, pt in cleaned_list:
+        for ts, pt, spd in cleaned_list:
             if ts == datetime.max:
                 t_str = existing_latest.get(mmsi, {}).get("timestamp", "")
                 if t_str:
@@ -591,8 +622,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         curr_sub = [cleaned_list[0][1]]
 
         for i in range(1, len(cleaned_list)):
-            prev_t, prev_p = cleaned_list[i-1]
-            curr_t, curr_p = cleaned_list[i]
+            prev_t, prev_p, prev_s = cleaned_list[i-1]
+            curr_t, curr_p, curr_s = cleaned_list[i]
             dlat = abs(curr_p[0] - prev_p[0])
             dlng = abs(curr_p[1] - prev_p[1])
             
@@ -600,7 +631,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
                 if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
-                interpolated = interpolate_sea_route(prev_p, curr_p, time_diff_hrs=time_diff_hrs)
+                interpolated = interpolate_sea_route(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
                 if interpolated and len(interpolated) >= 2: ordered_blocks.append(interpolated)
                 curr_sub = [curr_p]
             else:
