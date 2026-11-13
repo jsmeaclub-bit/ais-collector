@@ -245,57 +245,43 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 def catmull_rom_chain(coords):
-    if len(coords) < 2:
-        return coords
-
+    if len(coords) < 2: return coords
     pts = [coords[0]]
     for c in coords[1:]:
         if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
             pts.append(c)
-
-    if len(pts) < 3:
-        return pts
-
+    if len(pts) < 3: return pts
     p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
     p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
     ext_pts = [p_start] + pts + [p_end]
-
     alpha = 0.5 
     result = []
-
     def tj(ti, pi, pj):
         dist = math.hypot(pj[0] - pi[0], pj[1] - pi[1])
         return ti + max(1e-5, dist ** alpha)
-
     for i in range(len(ext_pts) - 3):
         p0, p1, p2, p3 = ext_pts[i], ext_pts[i + 1], ext_pts[i + 2], ext_pts[i + 3]
         t0 = 0.0
         t1 = tj(t0, p0, p1)
         t2 = tj(t1, p1, p2)
         t3 = tj(t2, p2, p3)
-
         seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
         n_steps = max(6, min(24, int(seg_dist / 0.015) + 4))
-
         for step in range(n_steps):
             t = t1 + (t2 - t1) * (step / float(n_steps))
-
             a1 = [(t1 - t) / (t1 - t0) * p0[0] + (t - t0) / (t1 - t0) * p1[0],
                   (t1 - t) / (t1 - t0) * p0[1] + (t - t0) / (t1 - t0) * p1[1]]
             a2 = [(t2 - t) / (t2 - t1) * p1[0] + (t - t1) / (t2 - t1) * p2[0],
                   (t2 - t) / (t2 - t1) * p1[1] + (t - t1) / (t2 - t1) * p2[1]]
             a3 = [(t3 - t) / (t3 - t2) * p2[0] + (t - t2) / (t3 - t2) * p3[0],
                   (t3 - t) / (t3 - t2) * p2[1] + (t - t2) / (t3 - t2) * p3[1]]
-
             b1 = [(t2 - t) / (t2 - t0) * a1[0] + (t - t0) / (t2 - t0) * a2[0],
                   (t2 - t) / (t2 - t0) * a1[1] + (t - t0) / (t2 - t0) * a2[1]]
             b2 = [(t3 - t) / (t3 - t1) * a2[0] + (t - t1) / (t3 - t1) * a3[0],
                   (t3 - t) / (t3 - t1) * a2[1] + (t - t1) / (t3 - t1) * a3[1]]
-
             c = [(t2 - t) / (t2 - t1) * b1[0] + (t - t1) / (t2 - t1) * b2[0],
                  (t2 - t) / (t2 - t1) * b1[1] + (t - t1) / (t2 - t1) * b2[1]]
             result.append([round(c[0], 5), round(c[1], 5)])
-
     result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
     return result
 
@@ -311,29 +297,21 @@ def simplify_line(coords, tolerance=0.002):
 def trim_overshoot(route_pts, p1, p2):
     pts = list(route_pts)
     for _ in range(3):
-        if len(pts) < 2:
-            break
+        if len(pts) < 2: break
         b = pts[-2]
         a = pts[-1]
         v1x, v1y = a[0] - b[0], a[1] - b[1]
         v2x, v2y = p2[0] - a[0], p2[1] - a[1]
-        if (v1x * v2x + v1y * v2y) < 0:
-            pts.pop()
-        else:
-            break
-
+        if (v1x * v2x + v1y * v2y) < 0: pts.pop()
+        else: break
     for _ in range(3):
-        if len(pts) < 2:
-            break
+        if len(pts) < 2: break
         a = pts[0]
         b = pts[1]
         v1x, v1y = a[0] - p1[0], a[1] - p1[1]
         v2x, v2y = b[0] - a[0], b[1] - a[1]
-        if (v1x * v2x + v1y * v2y) < 0:
-            pts.pop(0)
-        else:
-            break
-
+        if (v1x * v2x + v1y * v2y) < 0: pts.pop(0)
+        else: break
     return pts
 
 def interpolate_sea_route(p1, p2):
@@ -345,77 +323,45 @@ def interpolate_sea_route(p1, p2):
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             res = trim_overshoot(res, p1, p2)
-
-            if not res:
-                return [p1, p2]
-
-            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
-                res.insert(0, p1)
-            else:
-                res[0] = p1
-
-            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
-                res.append(p2)
-            else:
-                res[-1] = p2
-
+            if not res: return [p1, p2]
+            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
+            else: res[0] = p1
+            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
+            else: res[-1] = p2
             return catmull_rom_chain(res)
     except Exception:
         pass
     return [p1, p2]
 
 def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
-    if not current_pos:
-        return None
-        
+    if not current_pos: return None
     reversed_history = list(reversed(ship_history))
     past_received_pos = None
     past_dest_str = None
-    
     current_dest_upper = str(current_dest).strip().upper()
-    if not current_dest_upper or current_dest_upper in ("-", "", "NONE"):
-        return None
-        
+    if not current_dest_upper or current_dest_upper in ("-", "", "NONE"): return None
     for ts, pt, idx, r_dest in reversed_history:
-        if not r_dest or r_dest in ("-", "", "NONE"):
-            continue
+        if not r_dest or r_dest in ("-", "", "NONE"): continue
         if r_dest != current_dest_upper:
             past_dest_str = r_dest
             past_received_pos = pt
             break
-            
-    if not past_dest_str or not past_received_pos:
-        return None
-        
+    if not past_dest_str or not past_received_pos: return None
     port_info = port_dict.get(past_dest_str)
-    if not port_info:
-        return None
-        
+    if not port_info: return None
     port_pos = [port_info["lat"], port_info["lng"]]
-
     for _, pt, _, _ in reversed_history[:30]:
-        if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35:
-            return None
-
+        if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35: return None
     inferred_route_coords = []
-    
     try:
         c1_list = interpolate_sea_route(past_received_pos, port_pos)
-        if c1_list:
-            inferred_route_coords.extend(c1_list)
-            
+        if c1_list: inferred_route_coords.extend(c1_list)
         c2_list = interpolate_sea_route(port_pos, current_pos)
         if c2_list:
-            if inferred_route_coords:
-                inferred_route_coords.extend(c2_list[1:])
-            else:
-                inferred_route_coords.extend(c2_list)
-    except Exception:
-        return None
-        
-    if len(inferred_route_coords) < 2:
-        return None
-        
+            if inferred_route_coords: inferred_route_coords.extend(c2_list[1:])
+            else: inferred_route_coords.extend(c2_list)
+    except Exception: return None
+    if len(inferred_route_coords) < 2: return None
     return {
         "port_name": port_info["name"],
         "coords": inferred_route_coords
@@ -447,20 +393,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if mmsi not in master_map: continue
         if ship["lat"] is None or ship["lng"] is None: continue
         timestamp = now_utc.strftime("%Y/%m/%d %H:%M:%S")
-        
         dest = ship.get("destination", "")
         eta = ship.get("eta", "")
-        
-        row = [
-            timestamp, 
-            mmsi, 
-            ship["lat"], 
-            ship["lng"], 
-            ship["speed"], 
-            ship["heading"],
-            dest,
-            eta
-        ]
+        row = [timestamp, mmsi, ship["lat"], ship["lng"], ship["speed"], ship["heading"], dest, eta]
         new_history_rows.append(row)
 
     if new_history_rows:
@@ -475,9 +410,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     
     if os.path.exists(history_dir):
         for file in sorted(os.listdir(history_dir)):
-            if not (file.endswith('.csv') or file.endswith('.csv.gz')):
-                continue
-            
+            if not (file.endswith('.csv') or file.endswith('.csv.gz')): continue
             file_path = os.path.join(history_dir, file)
             try:
                 open_func = gzip.open if file_path.endswith('.csv.gz') else open
@@ -485,9 +418,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     reader = csv.reader(f)
                     header = next(reader, None)
                     if not header: continue
-                    
                     c_ts, c_mmsi, c_lat, c_lng = 0, 1, 2, 3
-                    
                     for i, col_name in enumerate(header):
                         c_name = col_name.strip().lower()
                         if "lat" in c_name or "緯度" in c_name: c_lat = i
@@ -497,31 +428,25 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
                     for idx, row in enumerate(reader):
                         if len(row) < 4: continue
-                        
                         r_dest = ""
                         if len(row) == 6 or len(row) == 8:
                             r_ts, r_mmsi, r_lat, r_lng = row[0], row[1], row[2], row[3]
-                            if len(row) == 8:
-                                r_dest = str(row[6]).strip().upper()
+                            if len(row) == 8: r_dest = str(row[6]).strip().upper()
                         elif len(row) > max(c_lat, c_lng, c_mmsi, c_ts):
                             r_ts, r_mmsi, r_lat, r_lng = row[c_ts], row[c_mmsi], row[c_lat], row[c_lng]
-                            if len(row) > 6:
-                                r_dest = str(row[6]).strip().upper()
-                        else:
-                            continue
+                            if len(row) > 6: r_dest = str(row[6]).strip().upper()
+                        else: continue
 
                         mmsi_str = str(r_mmsi).strip().split(".")[0]
                         if mmsi_str not in master_map: continue
                         try:
                             lat_val = float(r_lat)
                             lng_val = float(r_lng)
-                            if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0):
-                                continue
+                            if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0): continue
                             ts = robust_parse_timestamp(r_ts)
                             pt = [round(lat_val, 4), round(lng_val, 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx, r_dest))
-                        except Exception: 
-                            continue
+                        except Exception: continue
             except Exception as e:
                 print(f"Error reading history file {file_path}: {e}")
 
@@ -572,15 +497,13 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             }
             latest_coord = last_p
             
-        # ★ クリック時に表示する「生の計測ポイント（ドット）」用データを生成
         raw_points = []
         for ts, pt in cleaned_list:
             if ts == datetime.max:
                 t_str = existing_latest.get(mmsi, {}).get("timestamp", "")
                 if t_str:
                     dt_obj = robust_parse_timestamp(t_str)
-                    if dt_obj != datetime.min:
-                        t_str = dt_obj.strftime("%m/%d %H:%M")
+                    if dt_obj != datetime.min: t_str = dt_obj.strftime("%m/%d %H:%M")
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str})
             elif ts != datetime.min:
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M")})
@@ -598,44 +521,35 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             dlng = abs(curr_p[1] - prev_p[1])
             
             if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
-                if len(curr_sub) >= 2:
-                    ordered_blocks.append(curr_sub)
-                
+                if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
                 interpolated = interpolate_sea_route(prev_p, curr_p)
-                if interpolated and len(interpolated) >= 2:
-                    ordered_blocks.append(interpolated)
-                
+                if interpolated and len(interpolated) >= 2: ordered_blocks.append(interpolated)
                 curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
 
-        if len(curr_sub) >= 2:
-            ordered_blocks.append(curr_sub)
+        if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
 
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
             ordered_blocks.append(inferred_route["coords"])
 
-        if not ordered_blocks:
-            continue
+        if not ordered_blocks: continue
 
         processed_blocks = []
         for raw_coords in ordered_blocks:
             if len(raw_coords) > 200:
                 step = len(raw_coords) / 200.0
                 sub_sampled = [raw_coords[int(j * step)] for j in range(200)]
-                if sub_sampled[-1] != raw_coords[-1]:
-                    sub_sampled.append(raw_coords[-1])
+                if sub_sampled[-1] != raw_coords[-1]: sub_sampled.append(raw_coords[-1])
             else:
                 sub_sampled = raw_coords
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
-            if len(smoothed) >= 2:
-                processed_blocks.append(smoothed)
+            if len(smoothed) >= 2: processed_blocks.append(smoothed)
 
-        if not processed_blocks:
-            continue
+        if not processed_blocks: continue
 
         last_coords = processed_blocks[-1]
         heading = calculate_bearing(last_coords[-2], last_coords[-1])
@@ -649,20 +563,16 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             for c_idx in range(num_chunks):
                 s_i = int(round(c_idx * chunk_size))
                 e_i = int(round((c_idx + 1) * chunk_size))
-                if e_i <= s_i:
-                    e_i = min(n_pts - 1, s_i + 1)
+                if e_i <= s_i: e_i = min(n_pts - 1, s_i + 1)
                 sub_chunk = coords[s_i : e_i + 1]
                 if len(sub_chunk) >= 2:
                     chunk_g_keys = set()
                     for k in range(len(sub_chunk) - 1):
                         gks = register_segment_to_grid(sub_chunk[k], sub_chunk[k+1], mmsi, grid_all_map, GRID_SIZE)
                         chunk_g_keys.update(gks)
-                    
-                    # グラデーションを廃止し、フラットな不透明度に統一
                     seg_obj = {
                         "coords": sub_chunk,
-                        "g_keys": list(chunk_g_keys),
-                        "opacity": 0.85 
+                        "g_keys": list(chunk_g_keys)
                     }
                     segments.append(seg_obj)
 
@@ -672,21 +582,29 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "category": category, 
                 "heading": heading, 
                 "segments": segments,
-                "raw_points": raw_points # ★ ドット描画用データを追加
+                "raw_points": raw_points
             })
 
     for r in routes_output:
         for seg in r["segments"]:
             g_keys = seg.pop("g_keys", [])
+            shared = set()
             if g_keys:
                 count = max(len(grid_all_map.get(gk, set())) for gk in g_keys)
+                for gk in g_keys: shared.update(grid_all_map.get(gk, set()))
             else:
                 count = 1
+            if not shared: shared.add(r["mmsi"])
+                
             w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
+            seg["shared_mmsis"] = list(shared)
 
-    for mmsi, ship in existing_latest.items():
-        ship["heading"] = calculated_headings.get(mmsi, ship.get("heading", 0.0))
+    for mmsi, ship_data in existing_latest.items():
+        ship_data["heading"] = calculated_headings.get(mmsi, ship_data.get("heading", 0.0))
+        # 辞書の標準名(dest_name)を追加
+        dest_val = ship_data.get("destination", "-")
+        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
@@ -816,6 +734,9 @@ def main():
             if ship_data.get("owner") in ("-", "", None): ship_data["owner"] = m["owner"]
             if ship_data.get("operator") in ("-", "", None): ship_data["operator"] = m["operator"]
             if ship_data.get("survey") in ("-", "", None): ship_data["survey"] = m["survey"]
+            
+        dest_val = ship_data.get("destination", "-")
+        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
 
     update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict)
     update_coverage_from_all_latest(existing_latest)
