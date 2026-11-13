@@ -37,7 +37,8 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-GAP_THRESHOLD_DEG = 0.30
+# ★ 房総半島ショートカット対策：16km以上のギャップは主要航路(searoute)を適用する
+GAP_THRESHOLD_DEG = 0.15
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
@@ -320,7 +321,8 @@ def trim_overshoot(route_pts, p1, p2):
 
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    if straight_dist < 0.15:
+    # ★ 5km以内の超短距離のみ直線を引く。それ以上(16km以上等)は必ず主要航路で補完する
+    if straight_dist < 0.05:
         return [p1, p2]
 
     try:
@@ -333,7 +335,7 @@ def interpolate_sea_route(p1, p2):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
-            # ★ 外洋でのsearouteによる異常なV字スパイクを強力にカットするフィルター
+            # ★ 南アフリカ沖などの外洋で発生する、searouteのノード引き込み(スパイクバグ)を削除する鋭角フィルター
             filtered = [res[0]]
             for i in range(1, len(res)-1):
                 prev = filtered[-1]
@@ -346,8 +348,8 @@ def interpolate_sea_route(p1, p2):
                 norm2 = math.hypot(v2x, v2y)
                 if norm1 > 0 and norm2 > 0:
                     cos_th = max(-1.0, min(1.0, dot / (norm1 * norm2)))
-                    # 進行方向が90度以上曲がる（鋭いV字）場合、その頂点をスキップして滑らかにする
-                    if math.degrees(math.acos(cos_th)) > 85.0:
+                    # 進行方向が90度以上折れ曲がる（内角90度以下のV字）場合は、異常な頂点としてスキップする
+                    if math.degrees(math.acos(cos_th)) > 90.0:
                         continue
                 filtered.append(curr)
             filtered.append(res[-1])
@@ -386,6 +388,10 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     if not port_info: return None
     port_pos = [port_info["lat"], port_info["lng"]]
 
+    is_china = past_dest_str.startswith("CN") or (18.0 <= port_pos[0] <= 41.0 and 105.0 <= port_pos[1] <= 125.0)
+    if not is_china:
+        return None
+
     time_diff_hours = (current_ts - past_ts).total_seconds() / 3600.0
     if time_diff_hours <= 0:
         return None
@@ -395,11 +401,9 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     dist_nm = dist_deg * 60.0  
     req_speed = dist_nm / time_diff_hours
     
-    if req_speed > 20.0:
+    if req_speed > 22.0:
         return None
 
-    # ★ 港辞書の判定除外範囲を広げる（ご提案のロジック）
-    # 港の周囲 4.0度 (約240海里) 以内を通過していれば、すでに寄港/経由したとみなしスパイクを描かない
     for _, pt, _, _ in reversed_history:
         if math.hypot(pt[0] - port_pos[0], pt[1] - port_pos[1]) < 4.0:
             return None
@@ -514,8 +518,24 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         
         cleaned_list = []
         for item in data_list:
-            if not cleaned_list or cleaned_list[-1][1] != item[1]:
+            if not cleaned_list:
                 cleaned_list.append((item[0], item[1]))
+                continue
+            
+            last_ts, last_pt = cleaned_list[-1]
+            curr_ts, curr_pt = item[0], item[1]
+            
+            if curr_pt == last_pt:
+                continue
+                
+            time_diff_hrs = (curr_ts - last_ts).total_seconds() / 3600.0
+            if time_diff_hrs > 0:
+                dist_nm = math.hypot(curr_pt[0] - last_pt[0], curr_pt[1] - last_pt[1]) * 60.0
+                speed = dist_nm / time_diff_hrs
+                if speed > 50.0:
+                    continue
+            
+            cleaned_list.append((curr_ts, curr_pt))
                 
         latest_coord = None
         if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
@@ -523,7 +543,16 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             curr_lng = existing_latest[mmsi]["lng"]
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
             if not cleaned_list or cleaned_list[-1][1] != latest_coord:
-                cleaned_list.append((datetime.max, latest_coord))
+                if cleaned_list:
+                    last_ts, last_pt = cleaned_list[-1]
+                    now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+                    time_diff_hrs = (now_ts - last_ts).total_seconds() / 3600.0
+                    if time_diff_hrs > 0:
+                        dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
+                        if (dist_nm / time_diff_hrs) <= 50.0:
+                            cleaned_list.append((datetime.max, latest_coord))
+                else:
+                    cleaned_list.append((datetime.max, latest_coord))
 
         if cleaned_list and mmsi not in existing_latest:
             last_t, last_p = cleaned_list[-1]
