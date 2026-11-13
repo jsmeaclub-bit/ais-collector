@@ -16,12 +16,12 @@ from google.oauth2.service_account import Credentials
 try:
     import searoute as sr
     from shapely.geometry import Point, mapping, LineString
-    from shapely.ops import unary_union, substring
+    from shapely.ops import unary_union
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
     import searoute as sr
     from shapely.geometry import Point, mapping, LineString
-    from shapely.ops import unary_union, substring
+    from shapely.ops import unary_union
 
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
@@ -318,6 +318,24 @@ def trim_overshoot(route_pts, p1, p2):
         else: break
     return pts
 
+# ★ 追加：指定されたエッジ（線分）をサブノードで細かく補完し、対象点 p に最も近い点を返す関数
+def project_to_segment(p, a, b, step=0.01):
+    best_sn = a
+    min_d = float('inf')
+    dist_ab = math.hypot(b[0] - a[0], b[1] - a[1])
+    if dist_ab == 0:
+        return a
+        
+    steps = max(1, int(dist_ab / step))
+    for j in range(steps + 1):
+        t = j / float(steps)
+        sn = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+        d = math.hypot(sn[0] - p[0], sn[1] - p[1])
+        if d < min_d:
+            min_d = d
+            best_sn = sn
+    return best_sn
+
 def interpolate_sea_route(p1, p2, is_port_route=False):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     if straight_dist < 0.15:
@@ -334,63 +352,43 @@ def interpolate_sea_route(p1, p2, is_port_route=False):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
-            lane_nodes = [
-                c for c in res 
-                if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
-            ]
-
-            if len(lane_nodes) <= 1:
-                return [p1, p2]
-
-            # ★ ご提案プロセスの追加: 主要航路のラインを作成し、測定点から最短距離で接続(投影)する
-            lane_line = LineString(lane_nodes)
-            pt1 = Point(p1)
-            pt2 = Point(p2)
-            
-            # 測定点1, 2 から主要航路のラインへ垂線を下ろし、交点(最短接続点)を計算
-            dist_to_pt1 = lane_line.project(pt1)
-            dist_to_pt2 = lane_line.project(pt2)
-            
-            # 進行方向が逆にならないよう調整
-            if dist_to_pt1 > dist_to_pt2:
-                dist_to_pt1, dist_to_pt2 = dist_to_pt2, dist_to_pt1
+            # ★ ご提案プロセスの実装: 
+            # 全体を検索すると半島を飛び越えるため、「最初のエッジ」と「最後のエッジ」の2箇所だけを
+            # 約1km間隔(step=0.01)のサブノードで補完し、それぞれ最短距離で合流させる。
+            if len(res) >= 2:
+                snap_start = project_to_segment(p1, res[0], res[1], step=0.01)
+                snap_end = project_to_segment(p2, res[-2], res[-1], step=0.01)
                 
-            # 主要航路のうち、最短接続点AからBまでの「本当に必要な区間」だけを切り出す(トリミング)
-            trimmed_line = substring(lane_line, dist_to_pt1, dist_to_pt2)
-            
-            trimmed_coords = []
-            if trimmed_line.geom_type == 'LineString':
-                trimmed_coords = list(trimmed_line.coords)
-            elif trimmed_line.geom_type == 'Point':
-                trimmed_coords = [list(trimmed_line.coords)[0]]
-            else:
-                for geom in trimmed_line.geoms:
-                    trimmed_coords.extend(list(geom.coords))
-                    
-            trimmed_nodes = [[round(c[0], 4), round(c[1], 4)] for c in trimmed_coords]
+                if len(res) == 2:
+                    res = [snap_start, snap_end]
+                else:
+                    res = [snap_start] + res[1:-1] + [snap_end]
 
             if not is_port_route:
-                if len(trimmed_nodes) < 2:
-                    return [p1, p2]
-
-                lane_start = trimmed_nodes[0]
-                lane_end = trimmed_nodes[-1]
-
-                # 1. 投影・切り出し後でも「点」になる(移動距離が短い)場合はスパイク確定
-                lane_span = math.hypot(lane_end[0] - lane_start[0], lane_end[1] - lane_start[1])
-                if lane_span < 0.05:
-                    return [p1, p2]
-
-                # 2. 直角に最短接続してもなお、乗り降り(スナップ)距離が異常に長い場合は大回りスパイクとして排除
-                snap_dist = math.hypot(lane_start[0] - p1[0], lane_start[1] - p1[1]) + \
-                            math.hypot(lane_end[0] - p2[0], lane_end[1] - p2[1])
+                # 投影後の新しいルート(res)を使って累積移動距離を計算
+                lane_dist = 0.0
+                for i in range(len(res) - 1):
+                    lane_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
                 
-                if snap_dist > 0.5 and snap_dist > (straight_dist * 0.4):
+                # 1. 投影して無駄を削ぎ落とした後でも移動距離が極端に短い（約5.5km未満）場合はスパイク排除
+                if lane_dist < 0.05:
+                    return [p1, p2]
+                
+                # 2. D字・三角形の大回りスパイクの排除
+                # 測定地点から、補完された最適な合流点までのスナップ距離の合計
+                snap_dist = math.hypot(res[0][0] - p1[0], res[0][1] - p1[1]) + \
+                            math.hypot(res[-1][0] - p2[0], res[-1][1] - p2[1])
+                
+                # スナップ距離(往復)が、主要航路を走る距離の1.5倍より長く、かつ約33km(0.3度)以上ある場合、
+                # 遠くの沖合航路への無駄なD字大回りと判定して破棄する。
+                if snap_dist > (lane_dist * 1.5) and snap_dist > 0.3:
                     return [p1, p2]
 
-            # 測定点1 → 最短接続点 → (必要な主要航路) → 最短接続点 → 測定点2
-            final_res = [p1] + trimmed_nodes + [p2]
-            return catmull_rom_chain(final_res)
+            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
+            else: res[0] = p1
+            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
+            else: res[-1] = p2
+            return catmull_rom_chain(res)
     except Exception:
         pass
     return [p1, p2]
