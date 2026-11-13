@@ -37,7 +37,6 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-# ★ 房総半島ショートカット対策：16km以上のギャップは主要航路(searoute)を適用する
 GAP_THRESHOLD_DEG = 0.15
 
 def get_spreadsheet_client():
@@ -321,8 +320,7 @@ def trim_overshoot(route_pts, p1, p2):
 
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    # ★ 5km以内の超短距離のみ直線を引く。それ以上(16km以上等)は必ず主要航路で補完する
-    if straight_dist < 0.05:
+    if straight_dist < 0.15:
         return [p1, p2]
 
     try:
@@ -330,30 +328,29 @@ def interpolate_sea_route(p1, p2):
         destination = (p2[1], p2[0])
         route = sr.searoute(origin, destination)
         coords = route.get("geometry", {}).get("coordinates", [])
+        
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
-            # ★ 南アフリカ沖などの外洋で発生する、searouteのノード引き込み(スパイクバグ)を削除する鋭角フィルター
-            filtered = [res[0]]
-            for i in range(1, len(res)-1):
-                prev = filtered[-1]
-                curr = res[i]
-                nxt = res[i+1]
-                v1x, v1y = curr[0] - prev[0], curr[1] - prev[1]
-                v2x, v2y = nxt[0] - curr[0], nxt[1] - curr[1]
-                dot = v1x * v2x + v1y * v2y
-                norm1 = math.hypot(v1x, v1y)
-                norm2 = math.hypot(v2x, v2y)
-                if norm1 > 0 and norm2 > 0:
-                    cos_th = max(-1.0, min(1.0, dot / (norm1 * norm2)))
-                    # 進行方向が90度以上折れ曲がる（内角90度以下のV字）場合は、異常な頂点としてスキップする
-                    if math.degrees(math.acos(cos_th)) > 90.0:
-                        continue
-                filtered.append(curr)
-            filtered.append(res[-1])
-            res = filtered
+            # 元の測定点(p1, p2)とほぼ一致する端点を除いた「純粋な主要航路上のノード群」を抽出
+            lane_nodes = [
+                c for c in res 
+                if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
+            ]
+
+            # 1. 主要航路上のノードが1点しかない（＝「点」に向かって往復しているだけ）場合はスパイク確定
+            if len(lane_nodes) <= 1:
+                return [p1, p2]
+
+            # 2. スナップA(始点)からスナップB(終点)までの距離が 0.05度（約5.5km）未満の場合、
+            # 投影点のズレを含む「点への引き込みスパイク」と判定して排除する
+            lane_start = lane_nodes[0]
+            lane_end = lane_nodes[-1]
+            lane_span = math.hypot(lane_end[0] - lane_start[0], lane_end[1] - lane_start[1])
+            if lane_span < 0.05:
+                return [p1, p2]
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
