@@ -298,6 +298,8 @@ def simplify_line(coords, tolerance=0.002):
     except Exception:
         return coords
 
+# interpolate_sea_route 内部でのみ悪影響があったため、関数定義自体は残していますが
+# ルート計算時の呼び出しは削除しました。
 def trim_overshoot(route_pts, p1, p2):
     pts = list(route_pts)
     for _ in range(3):
@@ -330,45 +332,30 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         coords = route.get("geometry", {}).get("coordinates", [])
         
         if coords and len(coords) >= 2:
+            # 陸を避けるための安全な生のノードを100%信用してそのまま使用します。
+            # ※陸切りを引き起こしていた trim_overshoot の呼び出しを完全に削除しました。
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            res = trim_overshoot(res, p1, p2)
-            if not res: return [p1, p2]
-
+            
             if not is_port_route:
-                # ★ プロットAからプロットBの距離(lane_span)の判定を復活
-                # 端点(p1, p2)を除いた純粋なネットワークノード群を取得
-                lane_nodes = [
-                    c for c in res 
-                    if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
-                ]
-
-                if len(lane_nodes) <= 1:
-                    return [p1, p2]
-
-                lane_span = 0.0
-                for i in range(len(lane_nodes) - 1):
-                    lane_span += math.hypot(lane_nodes[i+1][0] - lane_nodes[i][0], lane_nodes[i+1][1] - lane_nodes[i][1])
-                
-                # スナップ後の主要航路移動距離が極端に短い場合は点スパイクとして確実に排除
-                if lane_span < 0.05:
-                    return [p1, p2]
-
-                # ★ 速度判定（最強のD字スパイク排除フィルター）
                 route_dist = 0.0
                 for i in range(len(res) - 1):
                     route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
                 
+                # ★ 最強判定：船の限界速度によるスパイク排除に一本化
                 if time_diff_hrs and time_diff_hrs > 0:
                     speed_knots = (route_dist * 60.0) / time_diff_hrs
                     max_allowed_speed = max(prev_speed + 5.0, 15.0)
+                    
+                    # ルート距離が長すぎて物理的に到達不可能な場合のみ、異常なスパイクとみなして破棄
                     if speed_knots > max_allowed_speed:
                         return [p1, p2]
 
-                # 長期間データ欠損時のバックアップ判定
-                if route_dist > (straight_dist * 2.5) and (route_dist - straight_dist) > 0.5:
-                    return [p1, p2]
-                
-                # ※陸切りを引き起こした幾何学的な膨らみ(max_lat_dev)判定は削除しました。
+                # ★ 長期途絶時(12時間以上)のバックネット判定
+                # 半島をU字に回る正常な迂回(日本沿岸など)を誤って破棄しないよう、
+                # データ途絶が12時間を超える場合に限定して倍率チェックを行います。
+                if (not time_diff_hrs or time_diff_hrs > 12.0):
+                    if route_dist > (straight_dist * 3.0) and (route_dist - straight_dist) > 0.5:
+                        return [p1, p2]
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
