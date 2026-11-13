@@ -320,11 +320,6 @@ def trim_overshoot(route_pts, p1, p2):
 
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    # ★ 短距離（約180海里＝3.0度未満）のギャップは、searouteの粗いネットワークによる
-    # 不自然なV字迂回（スラッシュ）を防ぐため、主要航路を使わず直接直線で補完する
-    if straight_dist < 3.0:
-        return [p1, p2]
-
     try:
         origin = (p1[1], p1[0])
         destination = (p2[1], p2[0])
@@ -335,11 +330,13 @@ def interpolate_sea_route(p1, p2):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
             
-            # ★ searouteによる迂回距離が直線距離の1.8倍以上になる場合は、不自然なスラッシュとみなして破棄
+            # ★ 陸地ショートカット（直線化の誤爆）を防ぐため、
+            # 「直線距離が短く（1.5度未満）、かつ迂回が極端に大きい（2倍以上）」場合のみ
+            # 不自然な沖合への引き込み（V字）とみなして直線化する。長距離は海路を維持。
             route_dist = 0.0
             for i in range(len(res)-1):
                 route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
-            if straight_dist > 0 and (route_dist / straight_dist) > 1.8:
+            if straight_dist > 0 and straight_dist < 1.5 and (route_dist / straight_dist) > 2.0:
                 return [p1, p2]
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
