@@ -318,25 +318,7 @@ def trim_overshoot(route_pts, p1, p2):
         else: break
     return pts
 
-# ★ サブノードを生成してエッジ上に最短接続（投影）する関数
-def project_to_segment(p, a, b, step=0.01):
-    best_sn = a
-    min_d = float('inf')
-    dist_ab = math.hypot(b[0] - a[0], b[1] - a[1])
-    if dist_ab == 0:
-        return a
-        
-    steps = max(1, int(dist_ab / step))
-    for j in range(steps + 1):
-        t = j / float(steps)
-        sn = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
-        d = math.hypot(sn[0] - p[0], sn[1] - p[1])
-        if d < min_d:
-            min_d = d
-            best_sn = sn
-    return best_sn
-
-def interpolate_sea_route(p1, p2, is_port_route=False):
+def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     if straight_dist < 0.15:
         return [p1, p2]
@@ -349,47 +331,27 @@ def interpolate_sea_route(p1, p2, is_port_route=False):
         
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            
-            # 陸避けの角ノードを消さないため、この時点での trim_overshoot を廃止
-            # searouteが付与した両端（p1,p2相当）を除き、純粋なネットワークノードのみを抽出
-            lane_nodes = [
-                c for c in res 
-                if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
-            ]
+            res = trim_overshoot(res, p1, p2)
+            if not res: return [p1, p2]
 
-            if len(lane_nodes) <= 1:
-                return [p1, p2]
-
-            # ★ ご指示のサブノードによるフラット化処理
-            # 測定点から「最初のエッジ」と「最後のエッジ」にサブノードを打って最短接続
-            snap_start = project_to_segment(p1, lane_nodes[0], lane_nodes[1], step=0.01)
-            snap_end = project_to_segment(p2, lane_nodes[-2], lane_nodes[-1], step=0.01)
-            
-            if len(lane_nodes) == 2:
-                final_res = [p1, snap_start, snap_end, p2]
-            else:
-                final_res = [p1, snap_start] + lane_nodes[1:-1] + [snap_end, p2]
-
-            # 接続が完了したあとに、余分な鋭角の折れ曲がり（フック）のみをトリミング
-            final_res = trim_overshoot(final_res, p1, p2)
-            if not final_res: return [p1, p2]
-
-            if not is_port_route:
-                # ユーザー様ご指示通り、「1.5倍の比率フィルター」は削除
-                # D字スパイクは上のサブノード合流によってすでに直線のラインになっているため、
-                # ここでは「サブノード間の移動距離が極端に短い（＝点スパイク）」場合のみ排除する
-                lane_span = 0.0
-                for i in range(len(final_res) - 1):
-                    lane_span += math.hypot(final_res[i+1][0] - final_res[i][0], final_res[i+1][1] - final_res[i][1])
+            # ★ ご提案の速度チェック一本化
+            # ポートルート（推測線）以外の通常のAIS補間において、
+            # searouteが引いたルート距離を所要時間で割り、物理的な限界速度(25ノット)を超える場合は即スパイクとして破棄。
+            # 不要な幾何学フィルター（サブノードや距離倍率）はすべて削除しました。
+            if not is_port_route and time_diff_hrs and time_diff_hrs > 0:
+                route_dist = 0.0
+                for i in range(len(res) - 1):
+                    route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
                 
-                if lane_span < 0.05:
+                speed_knots = (route_dist * 60.0) / time_diff_hrs
+                if speed_knots > 25.0:
                     return [p1, p2]
 
-            if abs(final_res[0][0] - p1[0]) > 0.001 or abs(final_res[0][1] - p1[1]) > 0.001: final_res.insert(0, p1)
-            else: final_res[0] = p1
-            if abs(final_res[-1][0] - p2[0]) > 0.001 or abs(final_res[-1][1] - p2[1]) > 0.001: final_res.append(p2)
-            else: final_res[-1] = p2
-            return catmull_rom_chain(final_res)
+            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
+            else: res[0] = p1
+            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
+            else: res[-1] = p2
+            return catmull_rom_chain(res)
     except Exception:
         pass
     return [p1, p2]
@@ -634,9 +596,11 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             dlat = abs(curr_p[0] - prev_p[0])
             dlng = abs(curr_p[1] - prev_p[1])
             
+            time_diff_hrs = (curr_t - prev_t).total_seconds() / 3600.0 if prev_t != datetime.min else 0
+            
             if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
                 if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
-                interpolated = interpolate_sea_route(prev_p, curr_p)
+                interpolated = interpolate_sea_route(prev_p, curr_p, time_diff_hrs=time_diff_hrs)
                 if interpolated and len(interpolated) >= 2: ordered_blocks.append(interpolated)
                 curr_sub = [curr_p]
             else:
