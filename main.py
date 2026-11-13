@@ -319,7 +319,6 @@ def trim_overshoot(route_pts, p1, p2):
     return pts
 
 def interpolate_sea_route(p1, p2):
-    straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     try:
         origin = (p1[1], p1[0])
         destination = (p2[1], p2[0])
@@ -329,15 +328,27 @@ def interpolate_sea_route(p1, p2):
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
-            
-            # ★ 陸地ショートカット（直線化の誤爆）を防ぐため、
-            # 「直線距離が短く（1.5度未満）、かつ迂回が極端に大きい（2倍以上）」場合のみ
-            # 不自然な沖合への引き込み（V字）とみなして直線化する。長距離は海路を維持。
-            route_dist = 0.0
-            for i in range(len(res)-1):
-                route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
-            if straight_dist > 0 and straight_dist < 1.5 and (route_dist / straight_dist) > 2.0:
-                return [p1, p2]
+
+            # ★ 陸地越えを引き起こしていた直線化ロジックを完全撤廃し、
+            # 代わりに内角60度以下の「異常な鋭角(V字の頂点)」だけを削るフィルターを導入
+            filtered = [res[0]]
+            for i in range(1, len(res)-1):
+                prev = filtered[-1]
+                curr = res[i]
+                nxt = res[i+1]
+                v1x, v1y = curr[0] - prev[0], curr[1] - prev[1]
+                v2x, v2y = nxt[0] - curr[0], nxt[1] - curr[1]
+                dot = v1x * v2x + v1y * v2y
+                norm1 = math.hypot(v1x, v1y)
+                norm2 = math.hypot(v2x, v2y)
+                if norm1 > 0 and norm2 > 0:
+                    cos_th = max(-1.0, min(1.0, dot / (norm1 * norm2)))
+                    # 進行方向が120度以上変化（内角60度以下の鋭角V字）する場合、そのノードをスキップ
+                    if math.degrees(math.acos(cos_th)) > 120.0:
+                        continue
+                filtered.append(curr)
+            filtered.append(res[-1])
+            res = filtered
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
