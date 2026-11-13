@@ -16,12 +16,12 @@ from google.oauth2.service_account import Credentials
 try:
     import searoute as sr
     from shapely.geometry import Point, mapping, LineString
-    from shapely.ops import unary_union
+    from shapely.ops import unary_union, substring
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
     import searoute as sr
     from shapely.geometry import Point, mapping, LineString
-    from shapely.ops import unary_union
+    from shapely.ops import unary_union, substring
 
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
@@ -318,7 +318,7 @@ def trim_overshoot(route_pts, p1, p2):
         else: break
     return pts
 
-def interpolate_sea_route(p1, p2):
+def interpolate_sea_route(p1, p2, is_port_route=False):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     if straight_dist < 0.15:
         return [p1, p2]
@@ -334,29 +334,63 @@ def interpolate_sea_route(p1, p2):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
-            # 元の測定点(p1, p2)とほぼ一致する端点を除いた「純粋な主要航路上のノード群」を抽出
             lane_nodes = [
                 c for c in res 
                 if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
             ]
 
-            # 1. 主要航路上のノードが1点しかない（＝「点」に向かって往復しているだけ）場合はスパイク確定
             if len(lane_nodes) <= 1:
                 return [p1, p2]
 
-            # 2. スナップA(始点)からスナップB(終点)までの距離が 0.05度（約5.5km）未満の場合、
-            # 投影点のズレを含む「点への引き込みスパイク」と判定して排除する
-            lane_start = lane_nodes[0]
-            lane_end = lane_nodes[-1]
-            lane_span = math.hypot(lane_end[0] - lane_start[0], lane_end[1] - lane_start[1])
-            if lane_span < 0.05:
-                return [p1, p2]
+            # ★ ご提案プロセスの追加: 主要航路のラインを作成し、測定点から最短距離で接続(投影)する
+            lane_line = LineString(lane_nodes)
+            pt1 = Point(p1)
+            pt2 = Point(p2)
+            
+            # 測定点1, 2 から主要航路のラインへ垂線を下ろし、交点(最短接続点)を計算
+            dist_to_pt1 = lane_line.project(pt1)
+            dist_to_pt2 = lane_line.project(pt2)
+            
+            # 進行方向が逆にならないよう調整
+            if dist_to_pt1 > dist_to_pt2:
+                dist_to_pt1, dist_to_pt2 = dist_to_pt2, dist_to_pt1
+                
+            # 主要航路のうち、最短接続点AからBまでの「本当に必要な区間」だけを切り出す(トリミング)
+            trimmed_line = substring(lane_line, dist_to_pt1, dist_to_pt2)
+            
+            trimmed_coords = []
+            if trimmed_line.geom_type == 'LineString':
+                trimmed_coords = list(trimmed_line.coords)
+            elif trimmed_line.geom_type == 'Point':
+                trimmed_coords = [list(trimmed_line.coords)[0]]
+            else:
+                for geom in trimmed_line.geoms:
+                    trimmed_coords.extend(list(geom.coords))
+                    
+            trimmed_nodes = [[round(c[0], 4), round(c[1], 4)] for c in trimmed_coords]
 
-            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
-            else: res[0] = p1
-            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
-            else: res[-1] = p2
-            return catmull_rom_chain(res)
+            if not is_port_route:
+                if len(trimmed_nodes) < 2:
+                    return [p1, p2]
+
+                lane_start = trimmed_nodes[0]
+                lane_end = trimmed_nodes[-1]
+
+                # 1. 投影・切り出し後でも「点」になる(移動距離が短い)場合はスパイク確定
+                lane_span = math.hypot(lane_end[0] - lane_start[0], lane_end[1] - lane_start[1])
+                if lane_span < 0.05:
+                    return [p1, p2]
+
+                # 2. 直角に最短接続してもなお、乗り降り(スナップ)距離が異常に長い場合は大回りスパイクとして排除
+                snap_dist = math.hypot(lane_start[0] - p1[0], lane_start[1] - p1[1]) + \
+                            math.hypot(lane_end[0] - p2[0], lane_end[1] - p2[1])
+                
+                if snap_dist > 0.5 and snap_dist > (straight_dist * 0.4):
+                    return [p1, p2]
+
+            # 測定点1 → 最短接続点 → (必要な主要航路) → 最短接続点 → 測定点2
+            final_res = [p1] + trimmed_nodes + [p2]
+            return catmull_rom_chain(final_res)
     except Exception:
         pass
     return [p1, p2]
@@ -407,9 +441,9 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
         
     inferred_route_coords = []
     try:
-        c1_list = interpolate_sea_route(past_received_pos, port_pos)
+        c1_list = interpolate_sea_route(past_received_pos, port_pos, is_port_route=True)
         if c1_list: inferred_route_coords.extend(c1_list)
-        c2_list = interpolate_sea_route(port_pos, current_pos)
+        c2_list = interpolate_sea_route(port_pos, current_pos, is_port_route=True)
         if c2_list:
             if inferred_route_coords: inferred_route_coords.extend(c2_list[1:])
             else: inferred_route_coords.extend(c2_list)
