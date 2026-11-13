@@ -104,31 +104,33 @@ def get_master_data(client):
 
 def get_port_dictionary(client):
     port_dict = {}
+    existing_ais_names = set()
     try:
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
         records = sheet.get_all_records()
         for r in records:
             ais_name = str(r.get("変換元(AIS表記)", "")).strip().upper()
-            lat = r.get("Lat")
-            lng = r.get("Lng")
-            name = r.get("寄港地名(標準)")
-            if ais_name and lat and lng:
-                try:
-                    port_dict[ais_name] = {
-                        "name": str(name),
-                        "lat": float(lat),
-                        "lng": float(lng)
-                    }
-                except ValueError:
-                    pass
+            if ais_name:
+                existing_ais_names.add(ais_name)
+                lat = r.get("Lat")
+                lng = r.get("Lng")
+                name = r.get("寄港地名(標準)")
+                if lat and lng:
+                    try:
+                        port_dict[ais_name] = {
+                            "name": str(name),
+                            "lat": float(lat),
+                            "lng": float(lng)
+                        }
+                    except ValueError:
+                        pass
     except Exception as e:
         print(f"[ERROR] 辞書の読み込みに失敗: {e}")
-    return port_dict
+    return port_dict, existing_ais_names
 
 def robust_parse_timestamp(ts_str):
     ts_str = str(ts_str).strip()
     if not ts_str: return datetime.min
-    # ★ 日付のみのフォーマット（%Y/%m/%dなど）を除外。時刻を持つものだけを有効にする
     formats = [
         "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
@@ -335,25 +337,58 @@ def interpolate_sea_route(p1, p2):
         pass
     return [p1, p2]
 
-def generate_inferred_port_route(ship_history, current_pos, current_dest, port_dict):
-    if not current_pos: return None
+def generate_inferred_port_route(ship_history, current_pos, current_ts, current_dest, port_dict):
+    """
+    中国（CN始まり、または中国沿岸座標）への寄港推測のみを復活し、
+    物理的に移動不可能な場合（スラッシュ）は弾くロジック。
+    """
+    if not current_pos or current_ts == datetime.min: return None
+    
     reversed_history = list(reversed(ship_history))
     past_received_pos = None
     past_dest_str = None
+    past_ts = datetime.min
+    
     current_dest_upper = str(current_dest).strip().upper()
     if not current_dest_upper or current_dest_upper in ("-", "", "NONE"): return None
+    
     for ts, pt, idx, r_dest in reversed_history:
         if not r_dest or r_dest in ("-", "", "NONE"): continue
         if r_dest != current_dest_upper:
             past_dest_str = r_dest
             past_received_pos = pt
+            past_ts = ts
             break
-    if not past_dest_str or not past_received_pos: return None
+            
+    if not past_dest_str or not past_received_pos or past_ts == datetime.min: return None
     port_info = port_dict.get(past_dest_str)
     if not port_info: return None
     port_pos = [port_info["lat"], port_info["lng"]]
+
+    # ★ 1. 中国の港（CN始まり、または緯度18~41/経度105~125）に限定
+    is_china = past_dest_str.startswith("CN") or (18.0 <= port_pos[0] <= 41.0 and 105.0 <= port_pos[1] <= 125.0)
+    if not is_china:
+        return None
+
+    # ★ 2. 物理的な移動可能性のチェック（スラッシュを完全に防止）
+    # 過去地点 → 港 → 現在地 への合計距離を計算し、経過時間で割って必要速度を出す
+    time_diff_hours = (current_ts - past_ts).total_seconds() / 3600.0
+    if time_diff_hours <= 0:
+        return None
+        
+    dist_deg = math.hypot(past_received_pos[0] - port_pos[0], past_received_pos[1] - port_pos[1]) + \
+               math.hypot(current_pos[0] - port_pos[0], current_pos[1] - port_pos[1])
+    dist_nm = dist_deg * 60.0  # 概算マイル
+    req_speed = dist_nm / time_diff_hours
+    
+    # 必要速度が 22ノット を超える場合は、物理的に寄港不可能な「行先変更の遅れ（スラッシュ）」とみなして除外
+    if req_speed > 22.0:
+        return None
+
+    # すでに実測で港付近を通っている場合は補完不要
     for _, pt, _, _ in reversed_history[:30]:
         if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35: return None
+        
     inferred_route_coords = []
     try:
         c1_list = interpolate_sea_route(past_received_pos, port_pos)
@@ -446,7 +481,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                             lng_val = float(r_lng)
                             if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0): continue
                             ts = robust_parse_timestamp(r_ts)
-                            # ★ 無効なタイムスタンプはここで除外
                             if ts == datetime.min: continue
                             pt = [round(lat_val, 4), round(lng_val, 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx, r_dest))
@@ -507,12 +541,15 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if t_str:
                     dt_obj = robust_parse_timestamp(t_str)
                     if dt_obj != datetime.min: t_str = dt_obj.strftime("%m/%d %H:%M")
-                # ★ 各ポイントにMMSIを持たせる
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str, "mmsi": mmsi})
             elif ts != datetime.min:
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M"), "mmsi": mmsi})
 
-        if len(cleaned_list) < 2: continue
+        # 軌跡を描画するのに十分なデータがない場合は Heading を強制的に北(0.0)にリセット
+        if len(cleaned_list) < 2: 
+            calculated_headings[mmsi] = 0.0
+            continue
+            
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
         ordered_blocks = []
@@ -534,8 +571,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
         if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
 
+        # ★ 中国への寄港推測を復活（速度による物理チェック付き）
+        current_ts_str = existing_latest.get(mmsi, {}).get("timestamp", "")
+        current_ts = robust_parse_timestamp(current_ts_str)
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
-        inferred_route = generate_inferred_port_route(data_list, latest_coord, current_dest, port_dict)
+        
+        inferred_route = generate_inferred_port_route(data_list, latest_coord, current_ts, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
             ordered_blocks.append(inferred_route["coords"])
 
@@ -553,7 +594,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             smoothed = simplify_line(smoothed, tolerance=0.0015)
             if len(smoothed) >= 2: processed_blocks.append(smoothed)
 
-        if not processed_blocks: continue
+        if not processed_blocks: 
+            calculated_headings[mmsi] = 0.0
+            continue
 
         last_coords = processed_blocks[-1]
         heading = calculate_bearing(last_coords[-2], last_coords[-1])
@@ -605,7 +648,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             seg["shared_mmsis"] = list(shared)
 
     for mmsi, ship_data in existing_latest.items():
-        ship_data["heading"] = calculated_headings.get(mmsi, ship_data.get("heading", 0.0))
+        ship_data["heading"] = calculated_headings.get(mmsi, 0.0)
         dest_val = ship_data.get("destination", "-")
         ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
 
@@ -674,8 +717,8 @@ def main():
     client = get_spreadsheet_client()
     if not client: return
     
+    port_dict, existing_ais_names = get_port_dictionary(client)
     master_map, master_counts = get_master_data(client)
-    port_dict = get_port_dictionary(client)
     
     existing_latest = {}
     if os.path.exists(LATEST_FILE):
@@ -752,6 +795,23 @@ def main():
             "recent_count": recent_count,
             "latest": list(existing_latest.values())
         }, f, ensure_ascii=False, indent=2)
+
+    # ★ 辞書（Port_Dictionary）の自動更新処理を復活
+    seen_dests = set()
+    for ship in existing_latest.values():
+        d = str(ship.get("destination", "")).strip().upper()
+        if d and d not in ("-", "NONE"):
+            seen_dests.add(d)
+    
+    new_dests = seen_dests - existing_ais_names
+    if new_dests:
+        try:
+            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
+            append_data = [[d, "", ""] for d in sorted(list(new_dests))]
+            sheet.append_rows(append_data)
+            print(f"[INFO] 辞書に {len(new_dests)} 件の新しい仕向地を追加しました。")
+        except Exception as e:
+            print(f"[ERROR] 辞書の自動更新に失敗: {e}")
 
 if __name__ == "__main__":
     main()
