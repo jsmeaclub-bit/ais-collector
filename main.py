@@ -37,7 +37,6 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-# 位置飛び補完（点線化）を発動する閾値（度）：0.60度 ≒ 約36海里
 GAP_THRESHOLD_DEG = 0.60
 
 def get_spreadsheet_client():
@@ -246,14 +245,9 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 def catmull_rom_chain(coords):
-    """
-    Centripetal Catmull-Rom 3次スプライン曲線で座標列を滑らかに補間する。
-    点間隔が不均一（粗い主要航路ノードと現在地）でもループや不自然な膨らみが生じない。
-    """
     if len(coords) < 2:
         return coords
 
-    # 連続する重複点を除去
     pts = [coords[0]]
     for c in coords[1:]:
         if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
@@ -262,12 +256,11 @@ def catmull_rom_chain(coords):
     if len(pts) < 3:
         return pts
 
-    # 始点と終点に自然な接線を生む仮想制御点を追加
     p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
     p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
     ext_pts = [p_start] + pts + [p_end]
 
-    alpha = 0.5  # Centripetal Catmull-Rom
+    alpha = 0.5 
     result = []
 
     def tj(ti, pi, pj):
@@ -316,10 +309,6 @@ def simplify_line(coords, tolerance=0.002):
         return coords
 
 def trim_overshoot(route_pts, p1, p2):
-    """
-    searouteが返すネットワーク基準点が、始点(p1)や終点(p2)を通り過ぎて
-    鋭角なV字折り返し(Uターン)を生む場合、過剰な基準点を削除する。
-    """
     pts = list(route_pts)
     for _ in range(3):
         if len(pts) < 2:
@@ -355,7 +344,6 @@ def interpolate_sea_route(p1, p2):
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            # 行き過ぎによる鋭角なV字折り返しをカット
             res = trim_overshoot(res, p1, p2)
 
             if not res:
@@ -371,7 +359,6 @@ def interpolate_sea_route(p1, p2):
             else:
                 res[-1] = p2
 
-            # Centripetal Catmull-Rom 3次スプライン曲線で滑らかに補間
             return catmull_rom_chain(res)
     except Exception:
         pass
@@ -541,8 +528,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     routes_output = []
     calculated_headings = {}
     
-    grid_flag_map = defaultdict(set)
-    grid_ctrl_map = defaultdict(set)
+    grid_all_map = defaultdict(set)
     GRID_SIZE = 0.08
 
     for mmsi, data_list in tracks_map.items():
@@ -585,11 +571,22 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t not in (datetime.min, datetime.max) else ""
             }
             latest_coord = last_p
+            
+        # ★ クリック時に表示する「生の計測ポイント（ドット）」用データを生成
+        raw_points = []
+        for ts, pt in cleaned_list:
+            if ts == datetime.max:
+                t_str = existing_latest.get(mmsi, {}).get("timestamp", "")
+                if t_str:
+                    dt_obj = robust_parse_timestamp(t_str)
+                    if dt_obj != datetime.min:
+                        t_str = dt_obj.strftime("%m/%d %H:%M")
+                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str})
+            elif ts != datetime.min:
+                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M")})
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
-        is_flag = (category == "日本籍船")
-        target_grid_map = grid_flag_map if is_flag else grid_ctrl_map
 
         ordered_blocks = []
         curr_sub = [cleaned_list[0][1]]
@@ -602,116 +599,90 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             if dlat > GAP_THRESHOLD_DEG or dlng > GAP_THRESHOLD_DEG:
                 if len(curr_sub) >= 2:
-                    ordered_blocks.append(("real", curr_sub, None))
+                    ordered_blocks.append(curr_sub)
                 
                 interpolated = interpolate_sea_route(prev_p, curr_p)
                 if interpolated and len(interpolated) >= 2:
-                    ordered_blocks.append(("inferred", interpolated, None))
+                    ordered_blocks.append(interpolated)
                 
                 curr_sub = [curr_p]
             else:
                 curr_sub.append(curr_p)
 
         if len(curr_sub) >= 2:
-            ordered_blocks.append(("real", curr_sub, None))
+            ordered_blocks.append(curr_sub)
 
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
-            ordered_blocks.append(("inferred", inferred_route["coords"], inferred_route["port_name"]))
+            ordered_blocks.append(inferred_route["coords"])
 
         if not ordered_blocks:
             continue
 
         processed_blocks = []
-        for kind, raw_coords, port_name in ordered_blocks:
-            if kind == "real":
-                if len(raw_coords) > 200:
-                    step = len(raw_coords) / 200.0
-                    sub_sampled = [raw_coords[int(j * step)] for j in range(200)]
-                    if sub_sampled[-1] != raw_coords[-1]:
-                        sub_sampled.append(raw_coords[-1])
-                else:
-                    sub_sampled = raw_coords
-                smoothed = catmull_rom_chain(sub_sampled)
-                smoothed = simplify_line(smoothed, tolerance=0.0015)
-                if len(smoothed) >= 2:
-                    processed_blocks.append(("real", smoothed, None))
+        for raw_coords in ordered_blocks:
+            if len(raw_coords) > 200:
+                step = len(raw_coords) / 200.0
+                sub_sampled = [raw_coords[int(j * step)] for j in range(200)]
+                if sub_sampled[-1] != raw_coords[-1]:
+                    sub_sampled.append(raw_coords[-1])
             else:
-                if len(raw_coords) >= 2:
-                    processed_blocks.append(("inferred", raw_coords, port_name))
+                sub_sampled = raw_coords
+            smoothed = catmull_rom_chain(sub_sampled)
+            smoothed = simplify_line(smoothed, tolerance=0.0015)
+            if len(smoothed) >= 2:
+                processed_blocks.append(smoothed)
 
         if not processed_blocks:
             continue
 
-        last_coords = processed_blocks[-1][1]
+        last_coords = processed_blocks[-1]
         heading = calculate_bearing(last_coords[-2], last_coords[-1])
         calculated_headings[mmsi] = heading
 
         segments = []
-        for kind, coords, port_name in processed_blocks:
-            if kind == "real":
-                for i in range(len(coords) - 1):
-                    p1, p2 = coords[i], coords[i+1]
-                    g_keys = register_segment_to_grid(p1, p2, mmsi, target_grid_map, GRID_SIZE)
-                    segments.append({
-                        "coords": [p1, p2],
-                        "g_keys": g_keys
-                    })
-            else:
-                n_pts = len(coords)
-                num_chunks = min(12, max(1, (n_pts - 1) // 6))
-                chunk_size = (n_pts - 1) / float(num_chunks)
-                for c_idx in range(num_chunks):
-                    s_i = int(round(c_idx * chunk_size))
-                    e_i = int(round((c_idx + 1) * chunk_size))
-                    if e_i <= s_i:
-                        e_i = min(n_pts - 1, s_i + 1)
-                    sub_chunk = coords[s_i : e_i + 1]
-                    if len(sub_chunk) >= 2:
-                        chunk_g_keys = set()
-                        for k in range(len(sub_chunk) - 1):
-                            gks = register_segment_to_grid(sub_chunk[k], sub_chunk[k+1], mmsi, target_grid_map, GRID_SIZE)
-                            chunk_g_keys.update(gks)
-                        seg_obj = {
-                            "coords": sub_chunk,
-                            "is_inferred": True,
-                            "g_keys": list(chunk_g_keys)
-                        }
-                        if port_name:
-                            seg_obj["port_name"] = port_name
-                        segments.append(seg_obj)
-
-        total_segs = len(segments)
-        for idx, seg in enumerate(segments):
-            ratio = idx / max(1, total_segs - 1)
-            seg["opacity"] = round(0.15 + (0.80 * ratio), 2)
+        for coords in processed_blocks:
+            n_pts = len(coords)
+            num_chunks = min(12, max(1, (n_pts - 1) // 6))
+            chunk_size = (n_pts - 1) / float(num_chunks)
+            for c_idx in range(num_chunks):
+                s_i = int(round(c_idx * chunk_size))
+                e_i = int(round((c_idx + 1) * chunk_size))
+                if e_i <= s_i:
+                    e_i = min(n_pts - 1, s_i + 1)
+                sub_chunk = coords[s_i : e_i + 1]
+                if len(sub_chunk) >= 2:
+                    chunk_g_keys = set()
+                    for k in range(len(sub_chunk) - 1):
+                        gks = register_segment_to_grid(sub_chunk[k], sub_chunk[k+1], mmsi, grid_all_map, GRID_SIZE)
+                        chunk_g_keys.update(gks)
+                    
+                    # グラデーションを廃止し、フラットな不透明度に統一
+                    seg_obj = {
+                        "coords": sub_chunk,
+                        "g_keys": list(chunk_g_keys),
+                        "opacity": 0.85 
+                    }
+                    segments.append(seg_obj)
 
         if segments:
             routes_output.append({
                 "mmsi": mmsi, 
                 "category": category, 
                 "heading": heading, 
-                "segments": segments
+                "segments": segments,
+                "raw_points": raw_points # ★ ドット描画用データを追加
             })
 
     for r in routes_output:
-        r_is_flag = (r.get("category") == "日本籍船")
-        t_map = grid_flag_map if r_is_flag else grid_ctrl_map
         for seg in r["segments"]:
             g_keys = seg.pop("g_keys", [])
             if g_keys:
-                count = max(len(t_map.get(gk, set())) for gk in g_keys)
+                count = max(len(grid_all_map.get(gk, set())) for gk in g_keys)
             else:
                 count = 1
-            base_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
-            if seg.get("is_inferred"):
-                if count >= 2:
-                    w_mult = min(4.0, base_mult * 1.3)
-                else:
-                    w_mult = 1.15
-            else:
-                w_mult = base_mult
+            w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
             seg["weight_multiplier"] = round(w_mult, 2)
 
     for mmsi, ship in existing_latest.items():
