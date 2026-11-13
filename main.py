@@ -319,6 +319,12 @@ def trim_overshoot(route_pts, p1, p2):
     return pts
 
 def interpolate_sea_route(p1, p2):
+    straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    # ★ 短距離（約180海里＝3.0度未満）のギャップは、searouteの粗いネットワークによる
+    # 不自然なV字迂回（スラッシュ）を防ぐため、主要航路を使わず直接直線で補完する
+    if straight_dist < 3.0:
+        return [p1, p2]
+
     try:
         origin = (p1[1], p1[0])
         destination = (p2[1], p2[0])
@@ -328,6 +334,14 @@ def interpolate_sea_route(p1, p2):
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
+            
+            # ★ searouteによる迂回距離が直線距離の1.8倍以上になる場合は、不自然なスラッシュとみなして破棄
+            route_dist = 0.0
+            for i in range(len(res)-1):
+                route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
+            if straight_dist > 0 and (route_dist / straight_dist) > 1.8:
+                return [p1, p2]
+
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
             if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
@@ -338,10 +352,6 @@ def interpolate_sea_route(p1, p2):
     return [p1, p2]
 
 def generate_inferred_port_route(ship_history, current_pos, current_ts, current_dest, port_dict):
-    """
-    中国（CN始まり、または中国沿岸座標）への寄港推測のみを復活し、
-    物理的に移動不可能な場合（スラッシュ）は弾くロジック。
-    """
     if not current_pos or current_ts == datetime.min: return None
     
     reversed_history = list(reversed(ship_history))
@@ -365,27 +375,22 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     if not port_info: return None
     port_pos = [port_info["lat"], port_info["lng"]]
 
-    # ★ 1. 中国の港（CN始まり、または緯度18~41/経度105~125）に限定
     is_china = past_dest_str.startswith("CN") or (18.0 <= port_pos[0] <= 41.0 and 105.0 <= port_pos[1] <= 125.0)
     if not is_china:
         return None
 
-    # ★ 2. 物理的な移動可能性のチェック（スラッシュを完全に防止）
-    # 過去地点 → 港 → 現在地 への合計距離を計算し、経過時間で割って必要速度を出す
     time_diff_hours = (current_ts - past_ts).total_seconds() / 3600.0
     if time_diff_hours <= 0:
         return None
         
     dist_deg = math.hypot(past_received_pos[0] - port_pos[0], past_received_pos[1] - port_pos[1]) + \
                math.hypot(current_pos[0] - port_pos[0], current_pos[1] - port_pos[1])
-    dist_nm = dist_deg * 60.0  # 概算マイル
+    dist_nm = dist_deg * 60.0  
     req_speed = dist_nm / time_diff_hours
     
-    # 必要速度が 22ノット を超える場合は、物理的に寄港不可能な「行先変更の遅れ（スラッシュ）」とみなして除外
     if req_speed > 22.0:
         return None
 
-    # すでに実測で港付近を通っている場合は補完不要
     for _, pt, _, _ in reversed_history[:30]:
         if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35: return None
         
@@ -545,7 +550,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             elif ts != datetime.min:
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M"), "mmsi": mmsi})
 
-        # 軌跡を描画するのに十分なデータがない場合は Heading を強制的に北(0.0)にリセット
         if len(cleaned_list) < 2: 
             calculated_headings[mmsi] = 0.0
             continue
@@ -571,7 +575,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
         if len(curr_sub) >= 2: ordered_blocks.append(curr_sub)
 
-        # ★ 中国への寄港推測を復活（速度による物理チェック付き）
         current_ts_str = existing_latest.get(mmsi, {}).get("timestamp", "")
         current_ts = robust_parse_timestamp(current_ts_str)
         current_dest = existing_latest.get(mmsi, {}).get("destination", "")
@@ -796,7 +799,6 @@ def main():
             "latest": list(existing_latest.values())
         }, f, ensure_ascii=False, indent=2)
 
-    # ★ 辞書（Port_Dictionary）の自動更新処理を復活
     seen_dests = set()
     for ship in existing_latest.values():
         d = str(ship.get("destination", "")).strip().upper()
