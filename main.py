@@ -37,7 +37,7 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-GAP_THRESHOLD_DEG = 0.12
+GAP_THRESHOLD_DEG = 0.30
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
@@ -320,7 +320,7 @@ def trim_overshoot(route_pts, p1, p2):
 
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    if straight_dist < 0.05:
+    if straight_dist < 0.15:
         return [p1, p2]
 
     try:
@@ -333,6 +333,7 @@ def interpolate_sea_route(p1, p2):
             res = trim_overshoot(res, p1, p2)
             if not res: return [p1, p2]
 
+            # ★ 外洋でのsearouteによる異常なV字スパイクを強力にカットするフィルター
             filtered = [res[0]]
             for i in range(1, len(res)-1):
                 prev = filtered[-1]
@@ -345,7 +346,8 @@ def interpolate_sea_route(p1, p2):
                 norm2 = math.hypot(v2x, v2y)
                 if norm1 > 0 and norm2 > 0:
                     cos_th = max(-1.0, min(1.0, dot / (norm1 * norm2)))
-                    if math.degrees(math.acos(cos_th)) > 120.0:
+                    # 進行方向が90度以上曲がる（鋭いV字）場合、その頂点をスキップして滑らかにする
+                    if math.degrees(math.acos(cos_th)) > 85.0:
                         continue
                 filtered.append(curr)
             filtered.append(res[-1])
@@ -384,10 +386,6 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     if not port_info: return None
     port_pos = [port_info["lat"], port_info["lng"]]
 
-    is_china = past_dest_str.startswith("CN") or (18.0 <= port_pos[0] <= 41.0 and 105.0 <= port_pos[1] <= 125.0)
-    if not is_china:
-        return None
-
     time_diff_hours = (current_ts - past_ts).total_seconds() / 3600.0
     if time_diff_hours <= 0:
         return None
@@ -397,13 +395,13 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     dist_nm = dist_deg * 60.0  
     req_speed = dist_nm / time_diff_hours
     
-    if req_speed > 22.0:
+    if req_speed > 20.0:
         return None
 
-    # ★ 港の近く（約60海里＝1.0度以内）を通過している場合は、
-    # 寄港ではなく「通過中に仕向地が変わっただけ」とみなし、推測ルート（スパイク）を描かない。
+    # ★ 港辞書の判定除外範囲を広げる（ご提案のロジック）
+    # 港の周囲 4.0度 (約240海里) 以内を通過していれば、すでに寄港/経由したとみなしスパイクを描かない
     for _, pt, _, _ in reversed_history:
-        if math.hypot(pt[0] - port_pos[0], pt[1] - port_pos[1]) < 1.0:
+        if math.hypot(pt[0] - port_pos[0], pt[1] - port_pos[1]) < 4.0:
             return None
         
     inferred_route_coords = []
