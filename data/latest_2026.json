@@ -110,7 +110,7 @@
       }
     ]
   },
-  "recent_count": 97,
+  "recent_count": 22,
   "latest": [
     {
       "mmsi": "373228000",
@@ -1129,7 +1129,7 @@
       "type": "Bulk Carrier",
       "gt": "44140",
       "survey": "20270418",
-      "heading": 102.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -1186,7 +1186,7 @@
       "lat": 34.13965333333333,
       "lng": 132.85328833333332,
       "speed": 13.3,
-      "heading": 241.8,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-09 19:35:47.387099302 +0000 UTC",
@@ -1503,13 +1503,13 @@
       "owner": "Kimura Shoji/KT Neo Marine",
       "operator": "KT Neo Marine SA",
       "survey": "20281016",
-      "lat": 41.33484833333333,
-      "lng": 2.1512516666666666,
+      "lat": 41.334849999999996,
+      "lng": 2.1512866666666666,
       "speed": 0,
       "heading": 326.8,
       "destination": "ESBCN",
       "eta": "11-12 04:30",
-      "timestamp": "2026-11-13 06:03:53.712316316 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:53.717218258 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -1669,7 +1669,7 @@
       "type": "General Cargo Ship",
       "gt": "9956",
       "survey": "20300204",
-      "heading": 138.8,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -1869,7 +1869,7 @@
       "type": "Bulk Carrier",
       "gt": "43455",
       "survey": "20300311",
-      "heading": 227.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -2186,7 +2186,7 @@
       "lat": -2.354071666666667,
       "lng": 105.57169666666667,
       "speed": 0.1,
-      "heading": 218.6,
+      "heading": 0.0,
       "destination": "ID PLM",
       "eta": "10-27 00:00",
       "timestamp": "2026-11-07 09:28:40.855195032 +0000 UTC",
@@ -2229,7 +2229,7 @@
       "type": "LNG Tanker",
       "gt": "122444",
       "survey": "",
-      "heading": 206.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -2283,13 +2283,13 @@
       "owner": "Japan Railway/Asia Pacific",
       "operator": "Asia Pacific Marine Corp",
       "survey": "20280327",
-      "lat": 35.45514,
-      "lng": 139.96408333333332,
-      "speed": 0.3,
-      "heading": 158.8,
+      "lat": 35.474655,
+      "lng": 139.95962666666668,
+      "speed": 11.8,
+      "heading": 349.5,
       "destination": ">JP SUZ OFF",
       "eta": "11-15 01:00",
-      "timestamp": "2026-11-13 08:40:05.782727784 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:24.187536002 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -2348,7 +2348,7 @@
       "speed": 0,
       "heading": 354.4,
       "destination": "AUMEL",
-      "eta": "11-08 08:00",
+      "eta": "11-13 13:00",
       "timestamp": "2026-11-13 08:39:52.119513754 +0000 UTC",
       "dest_name": ""
     },
@@ -2749,7 +2749,7 @@
       "type": "Container Ship (Fully Cellular)",
       "gt": "31999",
       "survey": "20280313",
-      "heading": 158.1,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -2809,7 +2809,7 @@
       "type": "Bulk Carrier",
       "gt": "51793",
       "survey": "20270613",
-      "heading": 349.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -2903,13 +2903,13 @@
       "owner": "Delica Shipping SA",
       "operator": "Inui Global Logistics Co Ltd",
       "survey": "20261030",
-      "lat": 54.35079333333333,
-      "lng": -130.27445833333334,
-      "speed": 0.1,
-      "heading": 34.1,
+      "lat": 54.350878333333334,
+      "lng": -130.27458833333333,
+      "speed": 0,
+      "heading": 34.0,
       "destination": "CA PRR",
       "eta": "11-12 21:00",
-      "timestamp": "2026-11-13 08:42:28.320860295 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:28.641624349 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -2969,7 +2969,7 @@
       "type": "Vehicles Carrier",
       "gt": "63084",
       "survey": "20301124",
-      "heading": 73.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -3169,7 +3169,7 @@
       "type": "Vehicles Carrier",
       "gt": "43810",
       "survey": "20310712",
-      "heading": 81.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -3283,13 +3283,13 @@
       "owner": "Nissen Kaiun/Southern Route",
       "operator": "Nissen Kaiun Co Ltd",
       "survey": "20301127",
-      "lat": 51.37020833333334,
-      "lng": 4.0727416666666665,
-      "speed": 9.6,
-      "heading": 75.3,
+      "lat": 51.344273333333334,
+      "lng": 4.283721666666667,
+      "speed": 0,
+      "heading": 103.2,
       "destination": "BE ANR",
       "eta": "11-12 10:00",
-      "timestamp": "2026-11-13 07:20:14.083151189 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:53.71285944 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -3629,7 +3629,7 @@
       "type": "Chemical/Products Tanker",
       "gt": "4902",
       "survey": "20281111",
-      "heading": 226.8,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -3669,7 +3669,7 @@
       "type": "Bulk Carrier",
       "gt": "60099",
       "survey": "20301224",
-      "heading": 4.8,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -3746,7 +3746,7 @@
       "lat": 27.8226,
       "lng": -97.17410666666666,
       "speed": 7.1,
-      "heading": 254.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-09 19:40:17.243266661 +0000 UTC",
@@ -3766,7 +3766,7 @@
       "lat": 17.662091666666665,
       "lng": -17.983483333333332,
       "speed": 19.3,
-      "heading": 178.8,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 08:11:05.331881997 +0000 UTC",
@@ -3789,7 +3789,7 @@
       "type": "General Cargo Ship (with Ro-Ro facility)",
       "gt": "9984",
       "survey": "20310315",
-      "heading": 178.5,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -3829,7 +3829,7 @@
       "type": "LPG Tanker",
       "gt": "5917",
       "survey": "20310316",
-      "heading": 229.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4146,7 +4146,7 @@
       "lat": 34.18897166666667,
       "lng": 134.981525,
       "speed": 11.6,
-      "heading": 43.3,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-10 12:33:17.79598954 +0000 UTC",
@@ -4369,7 +4369,7 @@
       "type": "Bulk Carrier",
       "gt": "50791",
       "survey": "20260927",
-      "heading": 65.8,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4489,7 +4489,7 @@
       "type": "General Cargo Ship",
       "gt": "12434",
       "survey": "20261014",
-      "heading": 75.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4586,7 +4586,7 @@
       "lat": 22.356305000000003,
       "lng": 114.051755,
       "speed": 14.2,
-      "heading": 290.7,
+      "heading": 0.0,
       "destination": "VNSGN",
       "eta": "11-10 01:00",
       "timestamp": "2026-11-07 18:14:43.847234977 +0000 UTC",
@@ -4649,7 +4649,7 @@
       "type": "Bulk Carrier",
       "gt": "43820",
       "survey": "20310722",
-      "heading": 314.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4689,7 +4689,7 @@
       "type": "Bulk Carrier",
       "gt": "43013",
       "survey": "20301025",
-      "heading": 1.1,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4769,7 +4769,7 @@
       "type": "Bulk Carrier",
       "gt": "60133",
       "survey": "20301206",
-      "heading": 180.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4789,7 +4789,7 @@
       "type": "Vehicles Carrier",
       "gt": "77695",
       "survey": "20310730",
-      "heading": 117.5,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4869,7 +4869,7 @@
       "type": "Bulk Carrier",
       "gt": "43112",
       "survey": "20290813",
-      "heading": 297.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -4929,7 +4929,7 @@
       "type": "Chemical/Products Tanker",
       "gt": "16445",
       "survey": "20270620",
-      "heading": 265.2,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5009,7 +5009,7 @@
       "type": "Vehicles Carrier",
       "gt": "57789",
       "survey": "20281127",
-      "heading": 132.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5109,7 +5109,7 @@
       "type": "Vehicles Carrier",
       "gt": "4238",
       "survey": "20310108",
-      "heading": 224.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5209,7 +5209,7 @@
       "type": "Ore Carrier",
       "gt": "136059",
       "survey": "20270510",
-      "heading": 243.6,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5229,7 +5229,7 @@
       "type": "Bulk Carrier",
       "gt": "106360",
       "survey": "20270828",
-      "heading": 350.5,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5429,7 +5429,7 @@
       "type": "Ore Carrier",
       "gt": "113977",
       "survey": "20301021",
-      "heading": 111.6,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5463,13 +5463,13 @@
       "owner": "Fair Wind Navigation SA",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20281031",
-      "lat": 50.378456666666665,
-      "lng": 0.48508666666666667,
-      "speed": 14,
-      "heading": 76.2,
+      "lat": 50.39217833333333,
+      "lng": 0.5507666666666666,
+      "speed": 14.1,
+      "heading": 72.2,
       "destination": "BEANR",
       "eta": "11-13 16:00",
-      "timestamp": "2026-11-13 08:40:21.959608955 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:40.839784928 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -5489,7 +5489,7 @@
       "type": "LNG Tanker",
       "gt": "114084",
       "survey": "20290130",
-      "heading": 82.6,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5609,7 +5609,7 @@
       "type": "Bulk Carrier",
       "gt": "89603",
       "survey": "20300114",
-      "heading": 90.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5689,7 +5689,7 @@
       "type": "Bulk Carrier",
       "gt": "93718",
       "survey": "20270725",
-      "heading": 245.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5829,7 +5829,7 @@
       "type": "Cement Carrier",
       "gt": "4057",
       "survey": "20270214",
-      "heading": 280.1,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5869,7 +5869,7 @@
       "type": "LNG Tanker",
       "gt": "114790",
       "survey": "20300830",
-      "heading": 190.0,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5889,7 +5889,7 @@
       "type": "Vehicles Carrier",
       "gt": "61775",
       "survey": "20270705",
-      "heading": 92.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -5986,7 +5986,7 @@
       "lat": 33.77797,
       "lng": 136.403925,
       "speed": 9.5,
-      "heading": 40.5,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-08 14:26:12.148027571 +0000 UTC",
@@ -6009,7 +6009,7 @@
       "type": "LPG Tanker",
       "gt": "46796",
       "survey": "20310329",
-      "heading": 125.3,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6146,7 +6146,7 @@
       "lat": 1.23133,
       "lng": 103.99175833333334,
       "speed": 12,
-      "heading": 158.7,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-09 02:20:42.447734423 +0000 UTC",
@@ -6166,7 +6166,7 @@
       "lat": 1.17255,
       "lng": 103.75800166666666,
       "speed": 0.1,
-      "heading": 255.9,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-08 15:22:14.669228699 +0000 UTC",
@@ -6186,7 +6186,7 @@
       "lat": 1.2643466666666667,
       "lng": 104.080995,
       "speed": 12.2,
-      "heading": 70.9,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-10 09:33:38.619761211 +0000 UTC",
@@ -6229,7 +6229,7 @@
       "type": "General Cargo Ship",
       "gt": "12162",
       "survey": "20290728",
-      "heading": 227.5,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6366,7 +6366,7 @@
       "lat": 35.39141166666666,
       "lng": 139.70789666666667,
       "speed": 13.3,
-      "heading": 238.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 10:33:21.273205706 +0000 UTC",
@@ -6486,7 +6486,7 @@
       "lat": 10.618188333333334,
       "lng": -61.65099,
       "speed": 0.2,
-      "heading": 317.8,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 12:37:04.799983356 +0000 UTC",
@@ -6609,7 +6609,7 @@
       "type": "Bulk Carrier",
       "gt": "43424",
       "survey": "20310406",
-      "heading": 140.6,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6689,7 +6689,7 @@
       "type": "LNG Tanker",
       "gt": "114790",
       "survey": "20301030",
-      "heading": 194.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6829,7 +6829,7 @@
       "type": "LPG Tanker",
       "gt": "50849",
       "survey": "20290425",
-      "heading": 152.5,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6969,7 +6969,7 @@
       "type": "Chemical/Products Tanker",
       "gt": "18287",
       "survey": "20310217",
-      "heading": 54.8,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -6983,13 +6983,13 @@
       "owner": "Misuga Kaiun Co Ltd",
       "operator": "Misuga Kaiun Co Ltd",
       "survey": "20280824",
-      "lat": -32.983405,
-      "lng": 152.108665,
-      "speed": 10.3,
-      "heading": 73.4,
+      "lat": -32.97572833333333,
+      "lng": 152.1521,
+      "speed": 10.2,
+      "heading": 77.6,
       "destination": "JP SMA",
       "eta": "11-29 04:00",
-      "timestamp": "2026-11-13 08:38:14.776639099 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:15.689779845 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -7009,7 +7009,7 @@
       "type": "General Cargo Ship",
       "gt": "3106",
       "survey": "20300312",
-      "heading": 49.1,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7049,7 +7049,7 @@
       "type": "Vehicles Carrier",
       "gt": "36615",
       "survey": "20300223",
-      "heading": 79.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7089,7 +7089,7 @@
       "type": "General Cargo Ship",
       "gt": "12991",
       "survey": "20280628",
-      "heading": 249.1,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7266,7 +7266,7 @@
       "lat": 1.27512,
       "lng": 103.963855,
       "speed": 7.2,
-      "heading": 64.6,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 09:29:29.266499197 +0000 UTC",
@@ -7409,7 +7409,7 @@
       "type": "Bulk Carrier",
       "gt": "107450",
       "survey": "20280807",
-      "heading": 226.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7449,7 +7449,7 @@
       "type": "Crude Oil Tanker",
       "gt": "160463",
       "survey": "20300730",
-      "heading": 65.2,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7509,7 +7509,7 @@
       "type": "Vehicles Carrier",
       "gt": "60401",
       "survey": "20310202",
-      "heading": 279.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7549,7 +7549,7 @@
       "type": "Crude Oil Tanker",
       "gt": "159930",
       "survey": "20301205",
-      "heading": 297.9,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7609,7 +7609,7 @@
       "type": "LPG Tanker",
       "gt": "57509",
       "survey": "20261108",
-      "heading": 63.4,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7649,7 +7649,7 @@
       "type": "General Cargo Ship",
       "gt": "7355",
       "survey": "20301210",
-      "heading": 61.7,
+      "heading": 0.0,
       "dest_name": ""
     },
     {
@@ -7706,7 +7706,7 @@
       "lat": 15.093033333333333,
       "lng": -17.802953333333335,
       "speed": 9.9,
-      "heading": 177.5,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-10 09:30:55.124905081 +0000 UTC",
@@ -7846,7 +7846,7 @@
       "lat": -34.940486666666665,
       "lng": 18.7629,
       "speed": 8.7,
-      "heading": 125.6,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 08:10:36.517775249 +0000 UTC",
@@ -8146,7 +8146,7 @@
       "lat": 33.52777833333333,
       "lng": 136.04981833333332,
       "speed": 11.6,
-      "heading": 224.9,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-09 03:28:06.362224311 +0000 UTC",
@@ -8203,13 +8203,13 @@
       "owner": "Showa Nittan Corp",
       "operator": "Showa Nittan Corp",
       "survey": "20301005",
-      "lat": 33.841300000000004,
-      "lng": 136.48774,
-      "speed": 13.4,
-      "heading": 47.9,
+      "lat": 35.25539666666667,
+      "lng": 139.77972499999998,
+      "speed": 12.8,
+      "heading": 320.7,
       "destination": "JP MII OFF",
       "eta": "11-10 23:30",
-      "timestamp": "2026-11-12 18:57:12.679742064 +0000 UTC",
+      "timestamp": "2026-11-13 08:52:07.20193184 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -8266,7 +8266,7 @@
       "lat": 33.58710333333333,
       "lng": 136.72081,
       "speed": 1.7,
-      "heading": 149.5,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 08:10:42.611916141 +0000 UTC",
@@ -8386,7 +8386,7 @@
       "lat": 1.2046983333333332,
       "lng": 103.87762333333333,
       "speed": 14,
-      "heading": 247.4,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-08 07:03:21.135691693 +0000 UTC",
@@ -8406,7 +8406,7 @@
       "lat": 19.285958333333333,
       "lng": -106.48104166666667,
       "speed": 11.2,
-      "heading": 92.0,
+      "heading": 0.0,
       "destination": "PABLB",
       "eta": "11-17 11:00",
       "timestamp": "2026-11-10 13:48:18.103263198 +0000 UTC",
@@ -8486,7 +8486,7 @@
       "lat": 33.169623333333334,
       "lng": 136.1568,
       "speed": 14.6,
-      "heading": 213.7,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-07 10:33:11.325603653 +0000 UTC",
@@ -10863,13 +10863,13 @@
       "owner": "Ocean Transit Carrier SA",
       "operator": "Yamamaru Kisen KK",
       "survey": "20290926",
-      "lat": 1.2524816666666667,
-      "lng": 103.88638999999999,
+      "lat": 1.2530783333333335,
+      "lng": 103.88572833333333,
       "speed": 0,
-      "heading": 35.9,
+      "heading": 19.7,
       "destination": "SG SIN",
       "eta": "11-08 01:00",
-      "timestamp": "2026-11-13 07:19:06.169840231 +0000 UTC",
+      "timestamp": "2026-11-13 08:52:00.092946558 +0000 UTC",
       "dest_name": "Singapore"
     },
     {
@@ -13027,10 +13027,10 @@
       "lng": 139.75214499999998,
       "speed": 0,
       "heading": 70.1,
-      "destination": ">JP KWS HO / NNX",
-      "eta": "11-12 14:20",
+      "destination": ">JP KWS HO EOT 1=A",
+      "eta": "11-13 09:50",
       "timestamp": "2026-11-13 06:05:55.365049771 +0000 UTC",
-      "dest_name": "Yokohama"
+      "dest_name": ""
     },
     {
       "mmsi": "538007361",
@@ -13703,13 +13703,13 @@
       "owner": "Kirishima Kisen KK",
       "operator": "Kirishima Kisen KK",
       "survey": "20301009",
-      "lat": 34.147965,
-      "lng": 132.874115,
-      "speed": 10.5,
-      "heading": 47.3,
+      "lat": 34.154878333333336,
+      "lng": 132.9095,
+      "speed": 11.5,
+      "heading": 76.7,
       "destination": ">>JP MIZ OFF",
       "eta": "11-13 21:30",
-      "timestamp": "2026-11-13 08:42:08.315633963 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:18.535321275 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -14143,13 +14143,13 @@
       "owner": "Moon Rise Shipping Co SA",
       "operator": "First Marine Service Co Ltd",
       "survey": "20270105",
-      "lat": -23.671615,
-      "lng": -70.43852,
-      "speed": 0.1,
-      "heading": 19.8,
+      "lat": -23.671438333333334,
+      "lng": -70.43890333333334,
+      "speed": 0.2,
+      "heading": 15.6,
       "destination": "CL COL",
       "eta": "10-31 09:00",
-      "timestamp": "2026-11-13 08:42:25.442124979 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:22.783653148 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -16383,13 +16383,13 @@
       "owner": "Daisy Shipping SA",
       "operator": "ENEOS Ocean Corp",
       "survey": "20310629",
-      "lat": 25.63919,
-      "lng": -92.08040666666668,
-      "speed": 15.2,
-      "heading": 0.0,
+      "lat": 29.237914999999997,
+      "lng": -94.46891333333333,
+      "speed": 0,
+      "heading": 339.6,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-10 07:09:56.856886528 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:46.040338568 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -18243,13 +18243,13 @@
       "owner": "Sea Queen Shipping Corp",
       "operator": "Nisshin Shipping Co Ltd",
       "survey": "20300612",
-      "lat": 62.97676333333333,
-      "lng": 7.769905,
-      "speed": 9.7,
-      "heading": 216.2,
+      "lat": 62.962824999999995,
+      "lng": 7.832276666666667,
+      "speed": 10.2,
+      "heading": 108.5,
       "destination": "BR VDC > NO SUN",
       "eta": "11-10 09:00",
-      "timestamp": "2026-11-13 08:38:39.927225677 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:29.357967367 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -18486,7 +18486,7 @@
       "lat": 28.535226666666667,
       "lng": -88.79536333333334,
       "speed": 0.9,
-      "heading": 302.0,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-11 12:45:12.20255346 +0000 UTC",
@@ -18506,7 +18506,7 @@
       "lat": 33.7757,
       "lng": 136.72803333333334,
       "speed": 18.3,
-      "heading": 100.4,
+      "heading": 0.0,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-11 12:45:20.5058888 +0000 UTC",
@@ -18546,7 +18546,7 @@
       "lat": 46.517736666666664,
       "lng": -124.647835,
       "speed": 13.2,
-      "heading": 67.0,
+      "heading": 316.9,
       "destination": "CA NWE",
       "eta": "11-14 15:00",
       "timestamp": "2026-11-13 08:40:33.963330374 +0000 UTC",
@@ -19863,13 +19863,13 @@
       "owner": "Mitsui OSK Lines Ltd",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20310629",
-      "lat": 39.79141166666667,
-      "lng": 139.988665,
-      "speed": 7.8,
-      "heading": 284.1,
+      "lat": 39.725503333333336,
+      "lng": 139.88724666666667,
+      "speed": 10,
+      "heading": 226.5,
       "destination": ">JP KNM US",
       "eta": "11-16 04:00",
-      "timestamp": "2026-11-13 08:13:46.819038721 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:48.013360145 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -19943,13 +19943,13 @@
       "owner": "Ocean Transit Carrier SA",
       "operator": "Yamamaru Kisen KK",
       "survey": "20301005",
-      "lat": 34.23732333333333,
-      "lng": 135.12624,
+      "lat": 34.23724666666667,
+      "lng": 135.12626166666666,
       "speed": 0,
-      "heading": 53.1,
+      "heading": 68.8,
       "destination": "JP WAK",
       "eta": "11-11 08:00",
-      "timestamp": "2026-11-13 07:18:57.130633822 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:57.136004195 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -20663,13 +20663,13 @@
       "owner": "Cyclamen Navigation Inc",
       "operator": "Nissan Motor Car Carrier",
       "survey": "20300418",
-      "lat": 51.48589833333333,
-      "lng": 2.7137733333333336,
-      "speed": 13.7,
-      "heading": 10.6,
+      "lat": 51.523385,
+      "lng": 2.7174766666666668,
+      "speed": 13.5,
+      "heading": 4.3,
       "destination": "GBTYN",
       "eta": "11-13 22:00",
-      "timestamp": "2026-11-13 08:41:21.921086091 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:23.46265971 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -20743,13 +20743,13 @@
       "owner": "Uyeno Transtech/Japan Railway",
       "operator": "Uyeno Transtech Ltd",
       "survey": "20261014",
-      "lat": 35.496343333333336,
-      "lng": 139.89345833333334,
-      "speed": 15.2,
-      "heading": 282.1,
+      "lat": 35.2849,
+      "lng": 139.74549666666664,
+      "speed": 12.8,
+      "heading": 205.7,
       "destination": "JP ANE OFF",
       "eta": "11-12 08:00",
-      "timestamp": "2026-11-13 07:34:19.711115594 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:23.681545234 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -21463,13 +21463,13 @@
       "owner": "Shintoku Panama SA",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20290816",
-      "lat": 43.421866666666666,
+      "lat": 43.421883333333334,
       "lng": 4.8383,
       "speed": 0,
       "heading": 316.7,
       "destination": "FRFOS",
       "eta": "11-10 08:00",
-      "timestamp": "2026-11-13 02:57:24.022183677 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:28.61195717 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -22203,13 +22203,13 @@
       "owner": "Sea Icon Shipping Co Ltd",
       "operator": "Dorval SC Tankers Inc",
       "survey": "20300621",
-      "lat": 1.1931466666666668,
-      "lng": 103.75215,
-      "speed": 0.1,
-      "heading": 272.7,
+      "lat": 1.1917233333333332,
+      "lng": 103.75435166666666,
+      "speed": 0.2,
+      "heading": 122.5,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-12 21:54:57.972739354 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:57.962480655 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -22963,13 +22963,13 @@
       "owner": "Tohoku Kaiun/Asia Pacific",
       "operator": "Izumi Kisen KK",
       "survey": "20280628",
-      "lat": 35.469325000000005,
-      "lng": 139.996915,
-      "speed": 0,
-      "heading": 132.7,
+      "lat": 35.469475,
+      "lng": 139.99706999999998,
+      "speed": 0.6,
+      "heading": 132.1,
       "destination": ">JP ANE KITASODE",
       "eta": "11-12 21:15",
-      "timestamp": "2026-11-13 06:06:25.06444514 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:26.153667374 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -23063,13 +23063,13 @@
       "owner": "Kawasaki Kisen Kaisha Ltd",
       "operator": "Kawasaki Kisen Kaisha Ltd",
       "survey": "20270709",
-      "lat": -19.0449,
-      "lng": 146.90546666666665,
-      "speed": 7.4,
+      "lat": -19.063066666666668,
+      "lng": 146.91201666666666,
+      "speed": 7.3,
       "heading": 161.6,
       "destination": "AUTSV",
       "eta": "11-13 09:00",
-      "timestamp": "2026-11-13 08:42:21.760620336 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:21.82770755 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -23503,13 +23503,13 @@
       "owner": "Keishin Kaiun/Ever Bright",
       "operator": "Toshin Kisen Co Ltd",
       "survey": "20280803",
-      "lat": 48.226885,
-      "lng": -123.83693166666667,
-      "speed": 7.4,
-      "heading": 105.1,
+      "lat": 48.222120000000004,
+      "lng": -123.56716833333333,
+      "speed": 7.1,
+      "heading": 90.2,
       "destination": "-",
       "eta": "-",
-      "timestamp": "2026-11-13 07:18:55.684892226 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:45.537903075 +0000 UTC",
       "dest_name": ""
     },
     {
@@ -23603,13 +23603,13 @@
       "owner": "Mitsui OSK Lines Ltd",
       "operator": "Mitsui OSK Lines Ltd",
       "survey": "20310827",
-      "lat": -33.961225,
-      "lng": -72.1087,
-      "speed": 13.3,
-      "heading": 27.0,
+      "lat": -33.76708166666666,
+      "lng": -71.98926333333334,
+      "speed": 13.6,
+      "heading": 27.1,
       "destination": "CL SAI",
       "eta": "11-13 11:00",
-      "timestamp": "2026-11-13 07:53:08.989290866 +0000 UTC",
+      "timestamp": "2026-11-13 08:51:39.847727602 +0000 UTC",
       "dest_name": ""
     },
     {
