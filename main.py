@@ -37,7 +37,6 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-# ★ 陸地横断の原因だったギャップ閾値を 0.60(約66km) から 0.12(約13km) に大幅に引き下げ
 GAP_THRESHOLD_DEG = 0.12
 
 def get_spreadsheet_client():
@@ -321,8 +320,6 @@ def trim_overshoot(route_pts, p1, p2):
 
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    # ★ ここでも直線を引く条件を 0.20 から 0.05（約5km）へ厳格化。
-    # 5km以上のギャップはすべて海路計算エンジン(searoute)へ渡し、陸地を適切に迂回させる。
     if straight_dist < 0.05:
         return [p1, p2]
 
@@ -403,8 +400,11 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     if req_speed > 22.0:
         return None
 
-    for _, pt, _, _ in reversed_history[:30]:
-        if abs(pt[0] - port_pos[0]) < 0.35 and abs(pt[1] - port_pos[1]) < 0.35: return None
+    # ★ 港の近く（約60海里＝1.0度以内）を通過している場合は、
+    # 寄港ではなく「通過中に仕向地が変わっただけ」とみなし、推測ルート（スパイク）を描かない。
+    for _, pt, _, _ in reversed_history:
+        if math.hypot(pt[0] - port_pos[0], pt[1] - port_pos[1]) < 1.0:
+            return None
         
     inferred_route_coords = []
     try:
