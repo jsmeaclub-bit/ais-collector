@@ -318,7 +318,7 @@ def trim_overshoot(route_pts, p1, p2):
         else: break
     return pts
 
-# ★ 追加：指定されたエッジ（線分）をサブノードで細かく補完し、対象点 p に最も近い点を返す関数
+# ★ サブノードを生成してエッジ上に最短接続（投影）する関数
 def project_to_segment(p, a, b, step=0.01):
     best_sn = a
     min_d = float('inf')
@@ -349,46 +349,47 @@ def interpolate_sea_route(p1, p2, is_port_route=False):
         
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            res = trim_overshoot(res, p1, p2)
-            if not res: return [p1, p2]
+            
+            # 陸避けの角ノードを消さないため、この時点での trim_overshoot を廃止
+            # searouteが付与した両端（p1,p2相当）を除き、純粋なネットワークノードのみを抽出
+            lane_nodes = [
+                c for c in res 
+                if math.hypot(c[0] - p1[0], c[1] - p1[1]) > 0.01 and math.hypot(c[0] - p2[0], c[1] - p2[1]) > 0.01
+            ]
 
-            # ★ ご提案プロセスの実装: 
-            # 全体を検索すると半島を飛び越えるため、「最初のエッジ」と「最後のエッジ」の2箇所だけを
-            # 約1km間隔(step=0.01)のサブノードで補完し、それぞれ最短距離で合流させる。
-            if len(res) >= 2:
-                snap_start = project_to_segment(p1, res[0], res[1], step=0.01)
-                snap_end = project_to_segment(p2, res[-2], res[-1], step=0.01)
-                
-                if len(res) == 2:
-                    res = [snap_start, snap_end]
-                else:
-                    res = [snap_start] + res[1:-1] + [snap_end]
+            if len(lane_nodes) <= 1:
+                return [p1, p2]
+
+            # ★ ご指示のサブノードによるフラット化処理
+            # 測定点から「最初のエッジ」と「最後のエッジ」にサブノードを打って最短接続
+            snap_start = project_to_segment(p1, lane_nodes[0], lane_nodes[1], step=0.01)
+            snap_end = project_to_segment(p2, lane_nodes[-2], lane_nodes[-1], step=0.01)
+            
+            if len(lane_nodes) == 2:
+                final_res = [p1, snap_start, snap_end, p2]
+            else:
+                final_res = [p1, snap_start] + lane_nodes[1:-1] + [snap_end, p2]
+
+            # 接続が完了したあとに、余分な鋭角の折れ曲がり（フック）のみをトリミング
+            final_res = trim_overshoot(final_res, p1, p2)
+            if not final_res: return [p1, p2]
 
             if not is_port_route:
-                # 投影後の新しいルート(res)を使って累積移動距離を計算
-                lane_dist = 0.0
-                for i in range(len(res) - 1):
-                    lane_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
+                # ユーザー様ご指示通り、「1.5倍の比率フィルター」は削除
+                # D字スパイクは上のサブノード合流によってすでに直線のラインになっているため、
+                # ここでは「サブノード間の移動距離が極端に短い（＝点スパイク）」場合のみ排除する
+                lane_span = 0.0
+                for i in range(len(final_res) - 1):
+                    lane_span += math.hypot(final_res[i+1][0] - final_res[i][0], final_res[i+1][1] - final_res[i][1])
                 
-                # 1. 投影して無駄を削ぎ落とした後でも移動距離が極端に短い（約5.5km未満）場合はスパイク排除
-                if lane_dist < 0.05:
-                    return [p1, p2]
-                
-                # 2. D字・三角形の大回りスパイクの排除
-                # 測定地点から、補完された最適な合流点までのスナップ距離の合計
-                snap_dist = math.hypot(res[0][0] - p1[0], res[0][1] - p1[1]) + \
-                            math.hypot(res[-1][0] - p2[0], res[-1][1] - p2[1])
-                
-                # スナップ距離(往復)が、主要航路を走る距離の1.5倍より長く、かつ約33km(0.3度)以上ある場合、
-                # 遠くの沖合航路への無駄なD字大回りと判定して破棄する。
-                if snap_dist > (lane_dist * 1.5) and snap_dist > 0.3:
+                if lane_span < 0.05:
                     return [p1, p2]
 
-            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
-            else: res[0] = p1
-            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001: res.append(p2)
-            else: res[-1] = p2
-            return catmull_rom_chain(res)
+            if abs(final_res[0][0] - p1[0]) > 0.001 or abs(final_res[0][1] - p1[1]) > 0.001: final_res.insert(0, p1)
+            else: final_res[0] = p1
+            if abs(final_res[-1][0] - p2[0]) > 0.001 or abs(final_res[-1][1] - p2[1]) > 0.001: final_res.append(p2)
+            else: final_res[-1] = p2
+            return catmull_rom_chain(final_res)
     except Exception:
         pass
     return [p1, p2]
