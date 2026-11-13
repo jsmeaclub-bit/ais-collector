@@ -128,12 +128,12 @@ def get_port_dictionary(client):
 def robust_parse_timestamp(ts_str):
     ts_str = str(ts_str).strip()
     if not ts_str: return datetime.min
+    # ★ 日付のみのフォーマット（%Y/%m/%dなど）を除外。時刻を持つものだけを有効にする
     formats = [
         "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
         "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M",
-        "%m/%d/%Y", "%Y/%m/%d", "%Y-%m-%d",
-        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y"
+        "%d/%m/%Y %H:%M:%S"
     ]
     clean_ts = ts_str.split(".")[0].replace(" +0000 UTC", "").replace(" UTC", "").replace("Z", "").replace("T", " ")
     for fmt in formats:
@@ -152,6 +152,8 @@ def generate_targeted_bboxes(master_map, existing_latest):
         ship = existing_latest[mmsi]
         ts_str = ship.get("timestamp", "")
         last_time = robust_parse_timestamp(ts_str)
+        if last_time == datetime.min:
+            continue
         hours_offline = (now_utc - last_time).total_seconds() / 3600.0
         
         if hours_offline > 24:
@@ -444,6 +446,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                             lng_val = float(r_lng)
                             if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0): continue
                             ts = robust_parse_timestamp(r_ts)
+                            # ★ 無効なタイムスタンプはここで除外
+                            if ts == datetime.min: continue
                             pt = [round(lat_val, 4), round(lng_val, 4)]
                             tracks_map[mmsi_str].append((ts, pt, idx, r_dest))
                         except Exception: continue
@@ -452,7 +456,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     routes_output = []
     calculated_headings = {}
-    
     grid_all_map = defaultdict(set)
     GRID_SIZE = 0.08
 
@@ -504,9 +507,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 if t_str:
                     dt_obj = robust_parse_timestamp(t_str)
                     if dt_obj != datetime.min: t_str = dt_obj.strftime("%m/%d %H:%M")
-                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str})
+                # ★ 各ポイントにMMSIを持たせる
+                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str, "mmsi": mmsi})
             elif ts != datetime.min:
-                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M")})
+                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M"), "mmsi": mmsi})
 
         if len(cleaned_list) < 2: continue
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
@@ -602,7 +606,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
     for mmsi, ship_data in existing_latest.items():
         ship_data["heading"] = calculated_headings.get(mmsi, ship_data.get("heading", 0.0))
-        # 辞書の標準名(dest_name)を追加
         dest_val = ship_data.get("destination", "-")
         ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
 
