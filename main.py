@@ -37,7 +37,8 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-GAP_THRESHOLD_DEG = 0.60
+# ★ 陸地横断の原因だったギャップ閾値を 0.60(約66km) から 0.12(約13km) に大幅に引き下げ
+GAP_THRESHOLD_DEG = 0.12
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY: return None
@@ -298,11 +299,31 @@ def simplify_line(coords, tolerance=0.002):
     except Exception:
         return coords
 
+def trim_overshoot(route_pts, p1, p2):
+    pts = list(route_pts)
+    for _ in range(3):
+        if len(pts) < 2: break
+        b = pts[-2]
+        a = pts[-1]
+        v1x, v1y = a[0] - b[0], a[1] - b[1]
+        v2x, v2y = p2[0] - a[0], p2[1] - a[1]
+        if (v1x * v2x + v1y * v2y) < 0: pts.pop()
+        else: break
+    for _ in range(3):
+        if len(pts) < 2: break
+        a = pts[0]
+        b = pts[1]
+        v1x, v1y = a[0] - p1[0], a[1] - p1[1]
+        v2x, v2y = b[0] - a[0], b[1] - a[1]
+        if (v1x * v2x + v1y * v2y) < 0: pts.pop(0)
+        else: break
+    return pts
+
 def interpolate_sea_route(p1, p2):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    # ★ 極端に近い場合（約12海里未満）のみ、searouteのノード引き込みを防ぐため直線を引く。
-    # これ以上の距離は、房総半島などの迂回に対応するためすべてsearoute（海路）に任せる。
-    if straight_dist < 0.2:
+    # ★ ここでも直線を引く条件を 0.20 から 0.05（約5km）へ厳格化。
+    # 5km以上のギャップはすべて海路計算エンジン(searoute)へ渡し、陸地を適切に迂回させる。
+    if straight_dist < 0.05:
         return [p1, p2]
 
     try:
@@ -312,6 +333,26 @@ def interpolate_sea_route(p1, p2):
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
+            res = trim_overshoot(res, p1, p2)
+            if not res: return [p1, p2]
+
+            filtered = [res[0]]
+            for i in range(1, len(res)-1):
+                prev = filtered[-1]
+                curr = res[i]
+                nxt = res[i+1]
+                v1x, v1y = curr[0] - prev[0], curr[1] - prev[1]
+                v2x, v2y = nxt[0] - curr[0], nxt[1] - curr[1]
+                dot = v1x * v2x + v1y * v2y
+                norm1 = math.hypot(v1x, v1y)
+                norm2 = math.hypot(v2x, v2y)
+                if norm1 > 0 and norm2 > 0:
+                    cos_th = max(-1.0, min(1.0, dot / (norm1 * norm2)))
+                    if math.degrees(math.acos(cos_th)) > 120.0:
+                        continue
+                filtered.append(curr)
+            filtered.append(res[-1])
+            res = filtered
 
             if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001: res.insert(0, p1)
             else: res[0] = p1
