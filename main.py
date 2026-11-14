@@ -23,17 +23,6 @@ except ImportError:
     from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 
-try:
-    from global_land_mask import globe
-    HAS_LAND_MASK = True
-except ImportError:
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "global-land-mask"])
-        from global_land_mask import globe
-        HAS_LAND_MASK = True
-    except Exception:
-        HAS_LAND_MASK = False
-
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
@@ -51,11 +40,16 @@ EXPIRATION_SECONDS = 180 * 24 * 3600
 # グリッドサーチ算出・最適バランス定数セット
 GAP_THRESHOLD_DEG       = 0.05
 MAX_GENERAL_SPEED_KNOTS = 26.0
-MIN_TIME_HRS_FOR_SPEED  = 0.5
+MIN_TIME_HRS_FOR_SPEED  = 1.0  
 MAX_DETOUR_RATIO        = 2.5
 MAX_EXCESS_DETOUR_DEG   = 0.6
 SPIKE_COS_THETA         = -0.8
 SPIKE_LEG_MIN_DEG       = 0.45
+MAX_STRAIGHT_FALLBACK_DEG = 0.35
+
+# ★ 追加：現実の商船が利用する主要な国際海峡の経由点
+TSUGARU_STRAIT = [41.45, 140.55] # 津軽海峡
+SOYA_STRAIT    = [45.65, 141.95] # 宗谷海峡
 
 
 def get_spreadsheet_client():
@@ -285,30 +279,13 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 
-def is_point_on_land(lat, lng):
-    if not HAS_LAND_MASK:
-        return False
-    try:
-        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
-            return bool(globe.is_land(lat, lng))
-    except Exception:
-        pass
-    return False
-
-
 def route_crosses_land(coords):
-    """
-    ルート上の全セグメントを細かくサンプリングし、内陸を通過していないか判定する。
-    また、searouteが経路探索失敗(NetworkXNoPath)で返す長距離直線も検知する。
-    """
     if len(coords) < 2:
         return False
-
     p_start = coords[0]
     p_end = coords[-1]
     total_straight = math.hypot(p_end[0] - p_start[0], p_end[1] - p_start[1])
 
-    # searouteがスナップ失敗時に返す「2点だけの長距離直線」を検知
     if total_straight > 0.20 and len(coords) <= 2:
         return True
 
@@ -316,62 +293,68 @@ def route_crosses_land(coords):
         a = coords[i]
         b = coords[i + 1]
         seg_dist = math.hypot(b[0] - a[0], b[1] - a[1])
-        if seg_dist == 0:
-            continue
-
-        # 1セグメントが極端に長い（海上ノードを経由していない直線ジャンプ）場合
-        if seg_dist > 1.2 and total_straight > 0.3:
-            if not HAS_LAND_MASK:
-                return True
-
-        if HAS_LAND_MASK:
-            steps = max(2, int(math.ceil(seg_dist / 0.02)))
-            for s in range(steps + 1):
-                t = s / float(steps)
-                lat = a[0] + (b[0] - a[0]) * t
-                lng = a[1] + (b[1] - a[1]) * t
-                # 港の岸壁付近（両端から約6.6km以内）の海岸線メッシュ誤差は許容
-                if math.hypot(lat - p_start[0], lng - p_start[1]) < 0.06:
-                    continue
-                if math.hypot(lat - p_end[0], lng - p_end[1]) < 0.06:
-                    continue
-                if is_point_on_land(lat, lng):
-                    return True
+        if seg_dist > 1.0 and total_straight > 0.3:
+            return True
 
     return False
 
 
-def get_offshore_candidates(pt):
-    """港湾の孤立ノードから脱出するため、周囲の海上候補点を返す"""
-    candidates = [pt]
-    if not HAS_LAND_MASK:
-        return candidates
+def intersects_northern_territories(coords):
+    """
+    ★ 追加：北方領土周辺（根室海峡〜国後・択捉周辺）の政治的リスクエリアを通過するか判定
+    このエリアを通るルートは2000GT以上の日本関係船ではあり得ないため弾く。
+    """
+    for lat, lng in coords:
+        if 43.2 <= lat <= 45.6 and 144.9 <= lng <= 149.0:
+            return True
+    return False
 
+
+def get_offshore_candidates(pt):
+    candidates = [pt]
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
-    for radius in (0.08, 0.16):
+    for radius in (0.05, 0.1):
         for dy, dx in dirs:
-            n_lat = round(pt[0] + dy * radius, 4)
-            n_lng = round(pt[1] + dx * radius, 4)
-            if not is_point_on_land(n_lat, n_lng):
-                candidates.append([n_lat, n_lng])
-                if len(candidates) >= 4:
-                    return candidates
+            candidates.append([round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)])
     return candidates
 
 
 def query_valid_searoute(p1, p2):
-    """searouteを実行し、陸切りが発生した場合は沖合ノードへずらして再検索する"""
     try:
         route = sr.searoute((p1[1], p1[0]), (p2[1], p2[0]))
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
+            
+            # ★ 追加：北方領土を通過するルートが生成された場合、安全な正規の海峡へ迂回させる
+            if intersects_northern_territories(res):
+                best_alt = None
+                best_alt_dist = float('inf')
+                # 津軽海峡・宗谷海峡経由の2パターンを計算し、短くて安全な方を採用
+                for via in [TSUGARU_STRAIT, SOYA_STRAIT]:
+                    try:
+                        r1 = sr.searoute((p1[1], p1[0]), (via[1], via[0]))
+                        r2 = sr.searoute((via[1], via[0]), (p2[1], p2[0]))
+                        c1 = r1.get("geometry", {}).get("coordinates", [])
+                        c2 = r2.get("geometry", {}).get("coordinates", [])
+                        if c1 and c2:
+                            alt_res = [[round(c[1], 4), round(c[0], 4)] for c in c1] + \
+                                      [[round(c[1], 4), round(c[0], 4)] for c in c2[1:]]
+                            if not intersects_northern_territories(alt_res) and not route_crosses_land(alt_res):
+                                d = sum(math.hypot(alt_res[i+1][0] - alt_res[i][0], alt_res[i+1][1] - alt_res[i][1]) for i in range(len(alt_res)-1))
+                                if d < best_alt_dist:
+                                    best_alt_dist = d
+                                    best_alt = alt_res
+                    except Exception:
+                        pass
+                if best_alt:
+                    return best_alt
+            
             if not route_crosses_land(res):
                 return res
     except Exception:
         pass
 
-    # 港の奥などでスナップ失敗（陸切り）した場合の沖合リトライ救済
     cands1 = get_offshore_candidates(p1)
     cands2 = get_offshore_candidates(p2)
     best_res = None
@@ -399,11 +382,13 @@ def query_valid_searoute(p1, p2):
             except Exception:
                 continue
 
-    return best_res
+    if best_res:
+        return best_res
+
+    return [p1, p2]
 
 
 def subdivide_long_segments(coords, max_step_deg=0.25):
-    """スプライン補間時に岬の先端を内側へ削らないよう、長い直線辺に中間点を挿入する"""
     if len(coords) < 2:
         return coords
     subdivided = [coords[0]]
@@ -482,10 +467,6 @@ def simplify_line(coords, tolerance=0.002):
 
 
 def remove_d_spikes(pts):
-    """
-    沖合へ飛び出して急角度で折り返す「D字スパイクの頂点」のみを間引く。
-    間引いた結果、陸地を横切る場合は元のノードを維持する。
-    """
     if len(pts) < 3:
         return pts
     
@@ -504,7 +485,6 @@ def remove_d_spikes(pts):
         if norm1 > 0 and norm2 > 0:
             cos_theta = (v1x * v2x + v1y * v2y) / (norm1 * norm2)
             if cos_theta < SPIKE_COS_THETA and norm1 > SPIKE_LEG_MIN_DEG and norm2 > SPIKE_LEG_MIN_DEG:
-                # 頂点をスキップした直線が陸地を切らない場合のみ削除
                 if not route_crosses_land([prev_p, next_p]):
                     continue
                 
@@ -520,12 +500,11 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         return [p1, p2]
 
     res = query_valid_searoute(p1, p2)
-    if not res or len(res) < 2:
-        # 陸を切らない海路が見つからない場合、陸切り直線で繋がずに軌跡を分割(None)
+    
+    if len(res) == 2 and straight_dist >= MAX_STRAIGHT_FALLBACK_DEG and not is_port_route:
         return None
 
     if not is_port_route:
-        # 1. 巨大なD字スパイクの飛び出し頂点のみを除去（陸切りしない範囲で実施）
         res = remove_d_spikes(res)
         if len(res) < 2:
             return None
@@ -534,15 +513,16 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         for i in range(len(res) - 1):
             route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
 
-        # 2. 沖合航路への異常な大回りスパイクの排除（陸切り防止のため直線化せず軌跡分割）
         if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
             return None
 
-        # 3. 一般値による速度判定（速度超過はワープ/MMSI重複とみなし軌跡分割）
         if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
             speed_knots = (route_dist * 60.0) / time_diff_hrs
             if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                return None
+                if straight_dist < MAX_STRAIGHT_FALLBACK_DEG:
+                    res = [p1, p2]
+                else:
+                    return None
 
     if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
         res.insert(0, p1)
@@ -554,7 +534,6 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         res[-1] = p2
 
     smoothed = catmull_rom_chain(res)
-    # スプライン丸め処理で半島先端を内側に削った場合は、元の折れ線(res)をそのまま返す
     if route_crosses_land(smoothed):
         return res
     return smoothed
@@ -875,7 +854,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 sub_sampled = raw_coords
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
-            # 簡略化処理で陸切りが発生した場合は元の座標列を保持
             if route_crosses_land(smoothed):
                 smoothed = sub_sampled
             if len(smoothed) >= 2:
