@@ -37,19 +37,17 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
-# グリッドサーチ算出・最適バランス定数セット
 GAP_THRESHOLD_DEG       = 0.05
 MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
-MAX_DETOUR_RATIO        = 2.5
+MAX_DETOUR_RATIO        = 3.0
 MAX_EXCESS_DETOUR_DEG   = 0.6
 SPIKE_COS_THETA         = -0.8
 SPIKE_LEG_MIN_DEG       = 0.45
-MAX_STRAIGHT_FALLBACK_DEG = 0.35
 
 # 現実の商船が利用する主要な国際海峡の経由点
-TSUGARU_STRAIT = [41.45, 140.55] # 津軽海峡
-SOYA_STRAIT    = [45.65, 141.95] # 宗谷海峡
+TSUGARU_STRAIT = [41.45, 140.55]
+SOYA_STRAIT    = [45.65, 141.95]
 
 
 def get_spreadsheet_client():
@@ -330,6 +328,7 @@ def query_valid_searoute(p1, p2):
     except Exception:
         pass
 
+    # スナップ失敗時の沖合リトライ
     cands1 = get_offshore_candidates(p1)
     cands2 = get_offshore_candidates(p2)
     best_res = None
@@ -470,28 +469,28 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         return [p1, p2]
 
     res = query_valid_searoute(p1, p2)
+    # searouteが取得できなかった場合は、線を切断せず直線で繋ぐ（外洋の長期航路補完のため）
     if not res:
-        return [p1, p2]
+        res = [p1, p2]
 
     if not is_port_route:
         res = remove_d_spikes(res)
         if len(res) < 2:
-            return None
+            res = [p1, p2]
 
         route_dist = 0.0
         for i in range(len(res) - 1):
             route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
 
+        # ルートが大回りすぎる場合は、線を切断せず直線で繋ぐ
         if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
-            return None
+            res = [p1, p2]
 
         if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
             speed_knots = (route_dist * 60.0) / time_diff_hrs
+            # 限界速度を超過した異常ルートの場合も、線を切断せず直線で繋ぐ
             if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                if straight_dist < MAX_STRAIGHT_FALLBACK_DEG:
-                    res = [p1, p2]
-                else:
-                    return None
+                res = [p1, p2]
 
     if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
         res.insert(0, p1)
@@ -713,7 +712,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if time_diff_hrs > 0:
                 dist_nm = math.hypot(curr_pt[0] - last_pt[0], curr_pt[1] - last_pt[1]) * 60.0
                 speed = dist_nm / time_diff_hrs
-                if dist_nm > 3.0 and speed > MAX_GENERAL_SPEED_KNOTS:
+                # 実測点を破棄する速度を50ノットに緩和し、外洋の点が消えないようにする
+                if dist_nm > 3.0 and speed > 50.0:
                     continue
             
             cleaned_list.append((curr_ts, curr_pt, curr_s))
@@ -736,7 +736,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 time_diff_hrs = (latest_ts - last_ts).total_seconds() / 3600.0
                 if time_diff_hrs > 0:
                     dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
-                    if not (dist_nm > 3.0 and (dist_nm / time_diff_hrs) > MAX_GENERAL_SPEED_KNOTS):
+                    if not (dist_nm > 3.0 and (dist_nm / time_diff_hrs) > 50.0):
                         cleaned_list.append((latest_ts, latest_coord, curr_spd))
 
         if cleaned_list and mmsi not in existing_latest:
