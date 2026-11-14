@@ -47,7 +47,7 @@ SPIKE_COS_THETA         = -0.8
 SPIKE_LEG_MIN_DEG       = 0.45
 MAX_STRAIGHT_FALLBACK_DEG = 0.35
 
-# ★ 追加：現実の商船が利用する主要な国際海峡の経由点
+# 現実の商船が利用する主要な国際海峡の経由点
 TSUGARU_STRAIT = [41.45, 140.55] # 津軽海峡
 SOYA_STRAIT    = [45.65, 141.95] # 宗谷海峡
 
@@ -279,31 +279,8 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 
-def route_crosses_land(coords):
-    if len(coords) < 2:
-        return False
-    p_start = coords[0]
-    p_end = coords[-1]
-    total_straight = math.hypot(p_end[0] - p_start[0], p_end[1] - p_start[1])
-
-    if total_straight > 0.20 and len(coords) <= 2:
-        return True
-
-    for i in range(len(coords) - 1):
-        a = coords[i]
-        b = coords[i + 1]
-        seg_dist = math.hypot(b[0] - a[0], b[1] - a[1])
-        if seg_dist > 1.0 and total_straight > 0.3:
-            return True
-
-    return False
-
-
 def intersects_northern_territories(coords):
-    """
-    ★ 追加：北方領土周辺（根室海峡〜国後・択捉周辺）の政治的リスクエリアを通過するか判定
-    このエリアを通るルートは2000GT以上の日本関係船ではあり得ないため弾く。
-    """
+    """北方領土周辺（根室海峡〜国後・択捉周辺）の通過判定"""
     for lat, lng in coords:
         if 43.2 <= lat <= 45.6 and 144.9 <= lng <= 149.0:
             return True
@@ -326,11 +303,10 @@ def query_valid_searoute(p1, p2):
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             
-            # ★ 追加：北方領土を通過するルートが生成された場合、安全な正規の海峡へ迂回させる
+            # 北方領土を通過するルートは安全な正規の海峡へ迂回させる
             if intersects_northern_territories(res):
                 best_alt = None
                 best_alt_dist = float('inf')
-                # 津軽海峡・宗谷海峡経由の2パターンを計算し、短くて安全な方を採用
                 for via in [TSUGARU_STRAIT, SOYA_STRAIT]:
                     try:
                         r1 = sr.searoute((p1[1], p1[0]), (via[1], via[0]))
@@ -340,7 +316,7 @@ def query_valid_searoute(p1, p2):
                         if c1 and c2:
                             alt_res = [[round(c[1], 4), round(c[0], 4)] for c in c1] + \
                                       [[round(c[1], 4), round(c[0], 4)] for c in c2[1:]]
-                            if not intersects_northern_territories(alt_res) and not route_crosses_land(alt_res):
+                            if not intersects_northern_territories(alt_res):
                                 d = sum(math.hypot(alt_res[i+1][0] - alt_res[i][0], alt_res[i+1][1] - alt_res[i][1]) for i in range(len(alt_res)-1))
                                 if d < best_alt_dist:
                                     best_alt_dist = d
@@ -350,8 +326,7 @@ def query_valid_searoute(p1, p2):
                 if best_alt:
                     return best_alt
             
-            if not route_crosses_land(res):
-                return res
+            return res
     except Exception:
         pass
 
@@ -371,14 +346,10 @@ def query_valid_searoute(p1, p2):
                     continue
                 res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
                 full_res = ([p1] if o1 != p1 else []) + res + ([p2] if o2 != p2 else [])
-                if not route_crosses_land(full_res):
-                    d = sum(
-                        math.hypot(full_res[i + 1][0] - full_res[i][0], full_res[i + 1][1] - full_res[i][1])
-                        for i in range(len(full_res) - 1)
-                    )
-                    if d < best_dist:
-                        best_dist = d
-                        best_res = full_res
+                d = sum(math.hypot(full_res[i + 1][0] - full_res[i][0], full_res[i + 1][1] - full_res[i][1]) for i in range(len(full_res) - 1))
+                if d < best_dist:
+                    best_dist = d
+                    best_res = full_res
             except Exception:
                 continue
 
@@ -485,8 +456,7 @@ def remove_d_spikes(pts):
         if norm1 > 0 and norm2 > 0:
             cos_theta = (v1x * v2x + v1y * v2y) / (norm1 * norm2)
             if cos_theta < SPIKE_COS_THETA and norm1 > SPIKE_LEG_MIN_DEG and norm2 > SPIKE_LEG_MIN_DEG:
-                if not route_crosses_land([prev_p, next_p]):
-                    continue
+                continue
                 
         cleaned.append(curr_p)
         
@@ -500,9 +470,8 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
         return [p1, p2]
 
     res = query_valid_searoute(p1, p2)
-    
-    if len(res) == 2 and straight_dist >= MAX_STRAIGHT_FALLBACK_DEG and not is_port_route:
-        return None
+    if not res:
+        return [p1, p2]
 
     if not is_port_route:
         res = remove_d_spikes(res)
@@ -533,10 +502,7 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
     else:
         res[-1] = p2
 
-    smoothed = catmull_rom_chain(res)
-    if route_crosses_land(smoothed):
-        return res
-    return smoothed
+    return catmull_rom_chain(res)
 
 
 def generate_inferred_port_route(ship_history, current_pos, current_ts, current_dest, port_dict):
@@ -854,8 +820,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 sub_sampled = raw_coords
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
-            if route_crosses_land(smoothed):
-                smoothed = sub_sampled
             if len(smoothed) >= 2:
                 processed_blocks.append(smoothed)
 
