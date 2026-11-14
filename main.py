@@ -23,6 +23,17 @@ except ImportError:
     from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 
+try:
+    from global_land_mask import globe
+    HAS_LAND_MASK = True
+except ImportError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "global-land-mask"])
+        from global_land_mask import globe
+        HAS_LAND_MASK = True
+    except Exception:
+        HAS_LAND_MASK = False
+
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
@@ -274,6 +285,144 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 
+def is_point_on_land(lat, lng):
+    if not HAS_LAND_MASK:
+        return False
+    try:
+        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
+            return bool(globe.is_land(lat, lng))
+    except Exception:
+        pass
+    return False
+
+
+def route_crosses_land(coords):
+    """
+    ルート上の全セグメントを細かくサンプリングし、内陸を通過していないか判定する。
+    また、searouteが経路探索失敗(NetworkXNoPath)で返す長距離直線も検知する。
+    """
+    if len(coords) < 2:
+        return False
+
+    p_start = coords[0]
+    p_end = coords[-1]
+    total_straight = math.hypot(p_end[0] - p_start[0], p_end[1] - p_start[1])
+
+    # searouteがスナップ失敗時に返す「2点だけの長距離直線」を検知
+    if total_straight > 0.20 and len(coords) <= 2:
+        return True
+
+    for i in range(len(coords) - 1):
+        a = coords[i]
+        b = coords[i + 1]
+        seg_dist = math.hypot(b[0] - a[0], b[1] - a[1])
+        if seg_dist == 0:
+            continue
+
+        # 1セグメントが極端に長い（海上ノードを経由していない直線ジャンプ）場合
+        if seg_dist > 1.2 and total_straight > 0.3:
+            if not HAS_LAND_MASK:
+                return True
+
+        if HAS_LAND_MASK:
+            steps = max(2, int(math.ceil(seg_dist / 0.02)))
+            for s in range(steps + 1):
+                t = s / float(steps)
+                lat = a[0] + (b[0] - a[0]) * t
+                lng = a[1] + (b[1] - a[1]) * t
+                # 港の岸壁付近（両端から約6.6km以内）の海岸線メッシュ誤差は許容
+                if math.hypot(lat - p_start[0], lng - p_start[1]) < 0.06:
+                    continue
+                if math.hypot(lat - p_end[0], lng - p_end[1]) < 0.06:
+                    continue
+                if is_point_on_land(lat, lng):
+                    return True
+
+    return False
+
+
+def get_offshore_candidates(pt):
+    """港湾の孤立ノードから脱出するため、周囲の海上候補点を返す"""
+    candidates = [pt]
+    if not HAS_LAND_MASK:
+        return candidates
+
+    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
+    for radius in (0.08, 0.16):
+        for dy, dx in dirs:
+            n_lat = round(pt[0] + dy * radius, 4)
+            n_lng = round(pt[1] + dx * radius, 4)
+            if not is_point_on_land(n_lat, n_lng):
+                candidates.append([n_lat, n_lng])
+                if len(candidates) >= 4:
+                    return candidates
+    return candidates
+
+
+def query_valid_searoute(p1, p2):
+    """searouteを実行し、陸切りが発生した場合は沖合ノードへずらして再検索する"""
+    try:
+        route = sr.searoute((p1[1], p1[0]), (p2[1], p2[0]))
+        coords = route.get("geometry", {}).get("coordinates", [])
+        if coords and len(coords) >= 2:
+            res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
+            if not route_crosses_land(res):
+                return res
+    except Exception:
+        pass
+
+    # 港の奥などでスナップ失敗（陸切り）した場合の沖合リトライ救済
+    cands1 = get_offshore_candidates(p1)
+    cands2 = get_offshore_candidates(p2)
+    best_res = None
+    best_dist = float("inf")
+
+    for o1 in cands1:
+        for o2 in cands2:
+            if o1 == p1 and o2 == p2:
+                continue
+            try:
+                route = sr.searoute((o1[1], o1[0]), (o2[1], o2[0]))
+                coords = route.get("geometry", {}).get("coordinates", [])
+                if not coords or len(coords) < 2:
+                    continue
+                res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
+                full_res = ([p1] if o1 != p1 else []) + res + ([p2] if o2 != p2 else [])
+                if not route_crosses_land(full_res):
+                    d = sum(
+                        math.hypot(full_res[i + 1][0] - full_res[i][0], full_res[i + 1][1] - full_res[i][1])
+                        for i in range(len(full_res) - 1)
+                    )
+                    if d < best_dist:
+                        best_dist = d
+                        best_res = full_res
+            except Exception:
+                continue
+
+    return best_res
+
+
+def subdivide_long_segments(coords, max_step_deg=0.25):
+    """スプライン補間時に岬の先端を内側へ削らないよう、長い直線辺に中間点を挿入する"""
+    if len(coords) < 2:
+        return coords
+    subdivided = [coords[0]]
+    for i in range(1, len(coords)):
+        p1 = subdivided[-1]
+        p2 = coords[i]
+        dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if dist > max_step_deg:
+            n = int(math.ceil(dist / max_step_deg))
+            for k in range(1, n):
+                t = k / float(n)
+                subdivided.append([
+                    round(p1[0] + (p2[0] - p1[0]) * t, 5),
+                    round(p1[1] + (p2[1] - p1[1]) * t, 5)
+                ])
+        subdivided.append(p2)
+    return subdivided
+
+
 def catmull_rom_chain(coords):
     if len(coords) < 2:
         return coords
@@ -283,6 +432,7 @@ def catmull_rom_chain(coords):
             pts.append(c)
     if len(pts) < 3:
         return pts
+    pts = subdivide_long_segments(pts, max_step_deg=0.25)
     p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
     p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
     ext_pts = [p_start] + pts + [p_end]
@@ -334,7 +484,7 @@ def simplify_line(coords, tolerance=0.002):
 def remove_d_spikes(pts):
     """
     沖合へ飛び出して急角度で折り返す「D字スパイクの頂点」のみを間引く。
-    半島を回り込む通常の沿岸カーブ（脚が短い・角度が緩やか）は保護する。
+    間引いた結果、陸地を横切る場合は元のノードを維持する。
     """
     if len(pts) < 3:
         return pts
@@ -354,7 +504,9 @@ def remove_d_spikes(pts):
         if norm1 > 0 and norm2 > 0:
             cos_theta = (v1x * v2x + v1y * v2y) / (norm1 * norm2)
             if cos_theta < SPIKE_COS_THETA and norm1 > SPIKE_LEG_MIN_DEG and norm2 > SPIKE_LEG_MIN_DEG:
-                continue
+                # 頂点をスキップした直線が陸地を切らない場合のみ削除
+                if not route_crosses_land([prev_p, next_p]):
+                    continue
                 
         cleaned.append(curr_p)
         
@@ -367,47 +519,45 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
     if straight_dist < GAP_THRESHOLD_DEG:
         return [p1, p2]
 
-    try:
-        origin = (p1[1], p1[0])
-        destination = (p2[1], p2[0])
-        route = sr.searoute(origin, destination)
-        coords = route.get("geometry", {}).get("coordinates", [])
-        
-        if coords and len(coords) >= 2:
-            res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            
-            if not is_port_route:
-                # 1. 巨大なD字スパイクの飛び出し頂点のみを除去
-                res = remove_d_spikes(res)
-                if len(res) < 2:
-                    return [p1, p2]
+    res = query_valid_searoute(p1, p2)
+    if not res or len(res) < 2:
+        # 陸を切らない海路が見つからない場合、陸切り直線で繋がずに軌跡を分割(None)
+        return None
 
-                route_dist = 0.0
-                for i in range(len(res) - 1):
-                    route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
+    if not is_port_route:
+        # 1. 巨大なD字スパイクの飛び出し頂点のみを除去（陸切りしない範囲で実施）
+        res = remove_d_spikes(res)
+        if len(res) < 2:
+            return None
 
-                # 2. 沖合航路への異常な大回りスパイクの排除
-                if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
-                    return [p1, p2]
+        route_dist = 0.0
+        for i in range(len(res) - 1):
+            route_dist += math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1])
 
-                # 3. 一般値による速度判定
-                if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
-                    speed_knots = (route_dist * 60.0) / time_diff_hrs
-                    if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                        return [p1, p2]
+        # 2. 沖合航路への異常な大回りスパイクの排除（陸切り防止のため直線化せず軌跡分割）
+        if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
+            return None
 
-            if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
-                res.insert(0, p1)
-            else:
-                res[0] = p1
-            if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
-                res.append(p2)
-            else:
-                res[-1] = p2
-            return catmull_rom_chain(res)
-    except Exception:
-        pass
-    return [p1, p2]
+        # 3. 一般値による速度判定（速度超過はワープ/MMSI重複とみなし軌跡分割）
+        if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
+            speed_knots = (route_dist * 60.0) / time_diff_hrs
+            if speed_knots > MAX_GENERAL_SPEED_KNOTS:
+                return None
+
+    if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
+        res.insert(0, p1)
+    else:
+        res[0] = p1
+    if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
+        res.append(p2)
+    else:
+        res[-1] = p2
+
+    smoothed = catmull_rom_chain(res)
+    # スプライン丸め処理で半島先端を内側に削った場合は、元の折れ線(res)をそのまま返す
+    if route_crosses_land(smoothed):
+        return res
+    return smoothed
 
 
 def generate_inferred_port_route(ship_history, current_pos, current_ts, current_dest, port_dict):
@@ -462,14 +612,13 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
     inferred_route_coords = []
     try:
         c1_list = interpolate_sea_route(past_received_pos, port_pos, is_port_route=True)
-        if c1_list:
-            inferred_route_coords.extend(c1_list)
+        if not c1_list:
+            return None
+        inferred_route_coords.extend(c1_list)
         c2_list = interpolate_sea_route(port_pos, current_pos, is_port_route=True)
-        if c2_list:
-            if inferred_route_coords:
-                inferred_route_coords.extend(c2_list[1:])
-            else:
-                inferred_route_coords.extend(c2_list)
+        if not c2_list:
+            return None
+        inferred_route_coords.extend(c2_list[1:])
     except Exception:
         return None
     if len(inferred_route_coords) < 2:
@@ -619,7 +768,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if time_diff_hrs > 0:
                 dist_nm = math.hypot(curr_pt[0] - last_pt[0], curr_pt[1] - last_pt[1]) * 60.0
                 speed = dist_nm / time_diff_hrs
-                if speed > 50.0:
+                if dist_nm > 3.0 and speed > MAX_GENERAL_SPEED_KNOTS:
                     continue
             
             cleaned_list.append((curr_ts, curr_pt, curr_s))
@@ -630,17 +779,20 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             curr_lng = existing_latest[mmsi]["lng"]
             curr_spd = existing_latest[mmsi].get("speed", 0.0)
             latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-            if not cleaned_list or cleaned_list[-1][1] != latest_coord:
-                if cleaned_list:
-                    last_ts, last_pt, last_s = cleaned_list[-1]
-                    now_ts = datetime.now(timezone.utc).replace(tzinfo=None)
-                    time_diff_hrs = (now_ts - last_ts).total_seconds() / 3600.0
-                    if time_diff_hrs > 0:
-                        dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
-                        if (dist_nm / time_diff_hrs) <= 50.0:
-                            cleaned_list.append((datetime.max, latest_coord, curr_spd))
-                else:
-                    cleaned_list.append((datetime.max, latest_coord, curr_spd))
+            latest_ts_str = existing_latest[mmsi].get("timestamp", "")
+            latest_ts = robust_parse_timestamp(latest_ts_str)
+            if latest_ts == datetime.min:
+                latest_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+
+            if not cleaned_list:
+                cleaned_list.append((latest_ts, latest_coord, curr_spd))
+            elif cleaned_list[-1][1] != latest_coord:
+                last_ts, last_pt, last_s = cleaned_list[-1]
+                time_diff_hrs = (latest_ts - last_ts).total_seconds() / 3600.0
+                if time_diff_hrs > 0:
+                    dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
+                    if not (dist_nm > 3.0 and (dist_nm / time_diff_hrs) > MAX_GENERAL_SPEED_KNOTS):
+                        cleaned_list.append((latest_ts, latest_coord, curr_spd))
 
         if cleaned_list and mmsi not in existing_latest:
             last_t, last_p, last_s = cleaned_list[-1]
@@ -662,20 +814,13 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 "heading": 0.0,
                 "destination": "-",
                 "eta": "-",
-                "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t not in (datetime.min, datetime.max) else ""
+                "timestamp": last_t.strftime("%Y/%m/%d %H:%M:%S") if last_t != datetime.min else ""
             }
             latest_coord = last_p
             
         raw_points = []
         for ts, pt, spd in cleaned_list:
-            if ts == datetime.max:
-                t_str = existing_latest.get(mmsi, {}).get("timestamp", "")
-                if t_str:
-                    dt_obj = robust_parse_timestamp(t_str)
-                    if dt_obj != datetime.min:
-                        t_str = dt_obj.strftime("%m/%d %H:%M")
-                raw_points.append({"lat": pt[0], "lng": pt[1], "ts": t_str, "mmsi": mmsi})
-            elif ts != datetime.min:
+            if ts != datetime.min:
                 raw_points.append({"lat": pt[0], "lng": pt[1], "ts": ts.strftime("%m/%d %H:%M"), "mmsi": mmsi})
 
         if len(cleaned_list) < 2: 
@@ -730,6 +875,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 sub_sampled = raw_coords
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
+            # 簡略化処理で陸切りが発生した場合は元の座標列を保持
+            if route_crosses_land(smoothed):
+                smoothed = sub_sampled
             if len(smoothed) >= 2:
                 processed_blocks.append(smoothed)
 
