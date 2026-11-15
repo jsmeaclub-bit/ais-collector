@@ -52,8 +52,9 @@ EXPIRATION_SECONDS = 180 * 24 * 3600
 
 MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
-SPIKE_COS_THETA         = -0.8
-SPIKE_LEG_MIN_DEG       = 0.45
+# V字スパイク（不自然な折れ曲がり）を削り落とすための閾値
+SPIKE_COS_THETA         = -0.3
+SPIKE_LEG_MIN_DEG       = 0.2
 
 TSUGARU_STRAIT = [41.45, 140.55]
 SOYA_STRAIT    = [45.65, 141.95]
@@ -90,7 +91,7 @@ def load_algorithm_map(client):
                 lng_b = float(r.get("Lng_Block", 0))
                 k = (lat_b, lng_b)
                 
-                # アルゴリズム判定 (手動優先)
+                # アルゴリズム判定 (手動設定を最優先)
                 algo = str(r.get("Manual_Algorithm", "")).strip()
                 if not algo and "Manual_Override" in r:
                     algo = str(r.get("Manual_Override", "")).strip()
@@ -98,7 +99,7 @@ def load_algorithm_map(client):
                     algo = str(r.get("Auto_Algorithm", "")).strip()
                 GLOBAL_ALGO_MAP[k] = algo
                 
-                # 北方領土回避判定 (手動優先)
+                # 北方領土回避判定 (手動設定を最優先)
                 avoid = str(r.get("Manual_Avoid_Northern", "")).strip().upper()
                 if avoid not in ("TRUE", "FALSE"):
                     avoid = str(r.get("Auto_Avoid_Northern", "")).strip().upper()
@@ -112,24 +113,18 @@ def load_algorithm_map(client):
 
 def get_route_algorithm(p1, p2):
     """
-    2点間を結ぶルートがどのアルゴリズムに属するかを判定する。
-    途中に「主要航路ベース」のブロックがあれば、安全のため主要航路を優先する。
+    始点か終点のどちらかが「主要航路ベース」のエリアであれば主要航路を適用。
+    それ以外（両方とも「測定点ベース」等の外洋）ならA*探索を試みる。
     """
-    dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
-    steps = max(3, int(math.ceil(dist / 0.5)))
-    
-    algo = "測定点ベース" 
-    for s in range(steps + 1):
-        t = s / steps if steps > 0 else 0
-        lat = p1[0] + (p2[0]-p1[0])*t
-        lng = p1[1] + (p2[1]-p1[1])*t
-        k = (math.floor(lat / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
-             math.floor(lng / MACRO_RESOLUTION) * MACRO_RESOLUTION)
-             
-        if GLOBAL_ALGO_MAP.get(k) == "主要航路ベース":
-            algo = "主要航路ベース"
-            
-    return algo
+    k1 = (math.floor(p1[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
+          math.floor(p1[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
+    k2 = (math.floor(p2[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
+          math.floor(p2[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
+          
+    if GLOBAL_ALGO_MAP.get(k1) == "主要航路ベース" or GLOBAL_ALGO_MAP.get(k2) == "主要航路ベース":
+        return "主要航路ベース"
+        
+    return "測定点ベース"
 
 
 def parse_gt(gt_val):
@@ -393,7 +388,7 @@ def route_crosses_land(coords):
 def intersects_northern_territories(coords):
     """
     スプレッドシートの GLOBAL_AVOID_NORTHERN リストに基づいて回避判定を行う。
-    リストが空の場合は、念のためデフォルトのバウンディングボックスでフォールバックする。
+    リストが空の場合は、デフォルトのバウンディングボックスでフォールバック。
     """
     for i in range(len(coords) - 1):
         a = coords[i]
@@ -407,14 +402,12 @@ def intersects_northern_territories(coords):
             lat = a[0] + (b[0] - a[0]) * t
             lng = a[1] + (b[1] - a[1]) * t
             
-            # スプレッドシートベースの判定
             if GLOBAL_AVOID_NORTHERN:
                 k = (math.floor(lat / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
                      math.floor(lng / MACRO_RESOLUTION) * MACRO_RESOLUTION)
                 if k in GLOBAL_AVOID_NORTHERN:
                     return True
             else:
-                # フォールバック (手動シートが取得できなかった場合)
                 if 43.2 <= lat <= 45.6 and 144.9 <= lng <= 149.0:
                     return True
     return False
@@ -462,7 +455,7 @@ def string_pull_path(path):
         return path
     smoothed_path = [path[0]]
     current_idx = 0
-    max_lookahead = 6  # 約150km先までの視界制限で巨大V字を防止
+    max_lookahead = 4  # 約110km先までの視界制限で巨大V字を防止
     
     while current_idx < len(path) - 1:
         furthest_visible_idx = current_idx + 1
@@ -490,12 +483,12 @@ def get_crowd_sourced_path(p1, p2):
     g_score = {start_gk: 0}
     
     def heuristic(node):
-        return math.hypot(node[0]-end_gk[0], node[1]-end_gk[1]) * 1.5
+        return math.hypot(node[0]-end_gk[0], node[1]-end_gk[1]) * 1.0
         
     f_score = {start_gk: heuristic(start_gk)}
     
     iterations = 0
-    while open_set and iterations < 8000:
+    while open_set and iterations < 12000:
         iterations += 1
         current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
         
@@ -646,7 +639,6 @@ def remove_d_spikes(pts):
 def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     
-    # 軌跡がスプレッドシートのどのアルゴリズムに属するかを判定
     algo = get_route_algorithm(p1, p2)
     is_main_route = (algo == "主要航路ベース")
     
@@ -656,14 +648,12 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
     res = None
 
     if is_main_route:
-        # 東京湾など、地形が複雑で主要航路固定のエリア
         if straight_dist < 0.03 and not direct_crosses and not direct_northern:
             return [p1, p2]
         res = query_valid_searoute(p1, p2)
         if not res:
             return None
     else:
-        # 南アフリカ沖や欧米など、データ豊富な外洋エリア
         if straight_dist < 1.5 and not direct_crosses and not direct_northern:
             return [p1, p2]
             
@@ -862,17 +852,6 @@ def catmull_rom_chain(coords):
             result.append([round(c[0], 5), round(c[1], 5)])
     result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
     return result
-
-
-def simplify_line(coords, tolerance=0.002):
-    if len(coords) < 3:
-        return coords
-    try:
-        line = LineString([(c[1], c[0]) for c in coords])
-        simplified = line.simplify(tolerance, preserve_topology=False)
-        return [[round(c[1], 5), round(c[0], 5)] for c in simplified.coords]
-    except Exception:
-        return coords
 
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict):
@@ -1134,8 +1113,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = raw_coords
             
+            # Catmull-Rom スプライン曲線による最終的な平滑化
             smoothed = catmull_rom_chain(sub_sampled)
-            smoothed = simplify_line(smoothed, tolerance=0.0015)
+            
             if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
                 smoothed = sub_sampled
                 
@@ -1157,228 +1137,3 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             chunk_size = (n_pts - 1) / float(num_chunks)
             for c_idx in range(num_chunks):
                 s_i = int(round(c_idx * chunk_size))
-                e_i = int(round((c_idx + 1) * chunk_size))
-                if e_i <= s_i:
-                    e_i = min(n_pts - 1, s_i + 1)
-                sub_chunk = coords[s_i : e_i + 1]
-                if len(sub_chunk) >= 2:
-                    chunk_g_keys = set()
-                    for k in range(len(sub_chunk) - 1):
-                        gks = register_segment_to_grid(sub_chunk[k], sub_chunk[k+1], mmsi, grid_all_map, GRID_SIZE)
-                        chunk_g_keys.update(gks)
-                    seg_obj = {
-                        "coords": sub_chunk,
-                        "g_keys": list(chunk_g_keys)
-                    }
-                    segments.append(seg_obj)
-
-        if segments:
-            routes_output.append({
-                "mmsi": mmsi, 
-                "category": category, 
-                "heading": heading, 
-                "segments": segments,
-                "raw_points": raw_points
-            })
-
-    for r in routes_output:
-        for seg in r["segments"]:
-            g_keys = seg.pop("g_keys", [])
-            shared = set()
-            if g_keys:
-                count = max(len(grid_all_map.get(gk, set())) for gk in g_keys)
-                for gk in g_keys:
-                    shared.update(grid_all_map.get(gk, set()))
-            else:
-                count = 1
-            if not shared:
-                shared.add(r["mmsi"])
-                
-            w_mult = min(3.2, 1.0 + (0.5 * math.log2(max(1, count))))
-            seg["weight_multiplier"] = round(w_mult, 2)
-            seg["shared_mmsis"] = list(shared)
-
-    for mmsi, ship_data in existing_latest.items():
-        ship_data["heading"] = calculated_headings.get(mmsi, 0.0)
-        dest_val = ship_data.get("destination", "-")
-        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
-
-    with open(ROUTES_FILE, "w", encoding="utf-8") as f:
-        json.dump(routes_output, f, ensure_ascii=False)
-
-    return calculated_headings
-
-
-def update_coverage_from_all_latest(existing_latest):
-    current_time = time.time()
-    six_months_ago = current_time - EXPIRATION_SECONDS
-
-    existing_points_dict = {}
-    if os.path.exists(COVERAGE_POINTS_FILE):
-        try:
-            with open(COVERAGE_POINTS_FILE, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-                for item in raw_data:
-                    if len(item) >= 2:
-                        lat, lng = item[0], item[1]
-                        ts = item[2] if len(item) >= 3 else current_time
-                        existing_points_dict[(lat, lng)] = ts
-        except Exception:
-            pass
-
-    for mmsi, ship in existing_latest.items():
-        lat = ship.get("lat")
-        lng = ship.get("lng")
-        if lat is not None and lng is not None:
-            ts_str = ship.get("timestamp", "")
-            dt = robust_parse_timestamp(ts_str)
-            ts = dt.replace(tzinfo=timezone.utc).timestamp() if dt != datetime.min else current_time
-            existing_points_dict[(round(float(lat), 2), round(float(lng), 2))] = ts
-
-    active_points = {}
-    for coords, ts in existing_points_dict.items():
-        if ts >= six_months_ago:
-            active_points[coords] = ts
-
-    merged_points = [[k[0], k[1], v] for k, v in active_points.items()]
-    with open(COVERAGE_POINTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(merged_points, f, ensure_ascii=False)
-
-    if active_points:
-        BUFFER_DEG = 0.33
-        circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in active_points.keys()]
-        merged_polygon = unary_union(circles)
-        
-        coverage_geojson = {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": mapping(merged_polygon),
-                    "properties": {
-                        "name": "Global AIS Coverage (Active)",
-                        "buffer_nm": 20
-                    }
-                }
-            ]
-        }
-        with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump(coverage_geojson, f, ensure_ascii=False)
-
-
-def main():
-    client = get_spreadsheet_client()
-    if not client:
-        return
-        
-    # ★ スプレッドシートからアルゴリズム設定をロード
-    load_algorithm_map(client)
-    
-    port_dict, existing_ais_names = get_port_dictionary(client)
-    master_map, master_counts = get_master_data(client)
-    
-    existing_latest = {}
-    if os.path.exists(LATEST_FILE):
-        try:
-            with open(LATEST_FILE, "r", encoding="utf-8") as f:
-                for s in json.load(f).get("latest", []):
-                    m_key = str(s.get("mmsi", "")).strip().split(".")[0]
-                    if m_key and m_key in master_map and s.get("lat") is not None and s.get("lng") is not None:
-                        existing_latest[m_key] = s
-        except Exception:
-            pass
-
-    bboxes = generate_targeted_bboxes(master_map, existing_latest)
-
-    live_ships = asyncio.run(collect_ais_data(set(master_map.keys()), bboxes))
-
-    for mmsi, ship in live_ships.items():
-        if mmsi not in master_map:
-            continue
-        m_info = master_map.get(mmsi, {})
-        prev = existing_latest.get(mmsi, {})
-        
-        new_lat = ship["lat"] if ship["lat"] is not None else prev.get("lat")
-        new_lng = ship["lng"] if ship["lng"] is not None else prev.get("lng")
-        if new_lat is None or new_lng is None:
-            continue
-
-        new_speed = ship["speed"] if ship["lat"] is not None else prev.get("speed", 0.0)
-        new_ts = ship["timestamp"] if (ship["lat"] is not None and ship.get("timestamp")) else prev.get("timestamp", ship.get("timestamp"))
-
-        existing_latest[mmsi] = {
-            "mmsi": mmsi,
-            "name": m_info.get("name") or ship["name"] or prev.get("name") or f"MMSI:{mmsi}",
-            "imo": m_info.get("imo", "-"),
-            "category": m_info.get("category", "日本船社運航船"),
-            "flag": m_info.get("flag", "-"),
-            "type": m_info.get("type", "-"),
-            "gt": m_info.get("gt", "-"),
-            "owner": m_info.get("owner", "-"),
-            "operator": m_info.get("operator", "-"),
-            "survey": m_info.get("survey", "-"),
-            "lat": new_lat,
-            "lng": new_lng,
-            "speed": new_speed,
-            "heading": prev.get("heading", 0.0),
-            "destination": ship["destination"] or prev.get("destination", "-"),
-            "eta": ship["eta"] or prev.get("eta", "-"),
-            "timestamp": new_ts
-        }
-
-    for mmsi, ship_data in existing_latest.items():
-        if mmsi in master_map:
-            m = master_map[mmsi]
-            if not ship_data.get("name") or ship_data["name"].startswith("MMSI:"):
-                ship_data["name"] = m["name"] or ship_data["name"]
-            if ship_data.get("imo") in ("-", "", None):
-                ship_data["imo"] = m["imo"]
-            if ship_data.get("category") in ("日本船社運航船", "", None):
-                ship_data["category"] = m["category"]
-            if ship_data.get("flag") in ("-", "", None):
-                ship_data["flag"] = m["flag"]
-            if ship_data.get("type") in ("-", "", None):
-                ship_data["type"] = m["type"]
-            if ship_data.get("gt") in ("-", "", None):
-                ship_data["gt"] = m["gt"]
-            if ship_data.get("owner") in ("-", "", None):
-                ship_data["owner"] = m["owner"]
-            if ship_data.get("operator") in ("-", "", None):
-                ship_data["operator"] = m["operator"]
-            if ship_data.get("survey") in ("-", "", None):
-                ship_data["survey"] = m["survey"]
-            
-        dest_val = ship_data.get("destination", "-")
-        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
-
-    update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict)
-    update_coverage_from_all_latest(existing_latest)
-    
-    recent_count = len([mmsi for mmsi, ship in live_ships.items() if ship.get("lat") is not None and ship.get("lng") is not None])
-
-    with open(LATEST_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "masterCounts": master_counts, 
-            "recent_count": recent_count,
-            "latest": list(existing_latest.values())
-        }, f, ensure_ascii=False, indent=2)
-
-    seen_dests = set()
-    for ship in existing_latest.values():
-        d = str(ship.get("destination", "")).strip().upper()
-        if d and d not in ("-", "NONE"):
-            seen_dests.add(d)
-    
-    new_dests = seen_dests - existing_ais_names
-    if new_dests:
-        try:
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
-            append_data = [[d, "", ""] for d in sorted(list(new_dests))]
-            sheet.append_rows(append_data)
-            print(f"[INFO] 辞書に {len(new_dests)} 件の新しい仕向地を追加しました。")
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    main()
