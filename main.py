@@ -55,8 +55,6 @@ MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
 MAX_DETOUR_RATIO        = 3.0
 MAX_EXCESS_DETOUR_DEG   = 0.6
-SPIKE_COS_THETA         = -0.8
-SPIKE_LEG_MIN_DEG       = 0.45
 
 TSUGARU_STRAIT = [41.45, 140.55]
 SOYA_STRAIT    = [45.65, 141.95]
@@ -419,7 +417,65 @@ def query_valid_searoute(p1, p2):
     return res
 
 
-def subdivide_long_segments(coords, max_step_deg=0.25):
+def optimize_sub_route(pts, is_japan):
+    """
+    ★ サブ航路生成（シュリンクラップ）アルゴリズム
+    南アフリカ等の外洋において、searouteの不自然な「コの字」迂回を解消し、
+    実測値の直線にぴったり沿う「並行した曲線」に引き締める。
+    """
+    if len(pts) <= 2:
+        return pts
+        
+    if is_japan:
+        # 日本沿岸は地形が複雑なため、searouteの主要航路（迂回路）を絶対的に尊重する
+        return pts
+        
+    optimized = [pts[0]]
+    i = 1
+    while i < len(pts) - 1:
+        prev_p = optimized[-1]
+        curr_p = pts[i]
+        
+        # 1. 貪欲ショートカット：迂回せずに先のノードへ直結（スキップ）できるかチェック
+        shortcut_found = False
+        for j in range(len(pts) - 1, i, -1):
+            next_p_cand = pts[j]
+            if not route_crosses_land([prev_p, next_p_cand]):
+                optimized.append(next_p_cand)
+                i = j
+                shortcut_found = True
+                break
+        
+        if shortcut_found:
+            if i == len(pts) - 1:
+                break
+            continue
+            
+        # 2. 沿岸への引き寄せ：ショートカット不可（陸地あり）の場合、ノードを直線（最短距離）側へ引き寄せる
+        next_p = pts[i + 1]
+        straight_mid = [(prev_p[0] + next_p[0]) / 2.0, (prev_p[1] + next_p[1]) / 2.0]
+        best_p = curr_p
+        
+        # 直線側(0.1) から searoute側(0.8) まで引き寄せテストを行い、陸を切らない限界点を採用
+        for ratio in [0.1, 0.25, 0.4, 0.6, 0.8]:
+            test_p = [
+                straight_mid[0] + (curr_p[0] - straight_mid[0]) * ratio,
+                straight_mid[1] + (curr_p[1] - straight_mid[1]) * ratio
+            ]
+            if not route_crosses_land([prev_p, test_p, next_p]):
+                best_p = test_p
+                break
+                
+        optimized.append(best_p)
+        i += 1
+        
+    if optimized[-1] != pts[-1]:
+        optimized.append(pts[-1])
+        
+    return optimized
+
+
+def subdivide_long_segments(coords, max_step_deg=0.1):
     if len(coords) < 2:
         return coords
     subdivided = [coords[0]]
@@ -448,7 +504,7 @@ def catmull_rom_chain(coords):
             pts.append(c)
     if len(pts) < 3:
         return pts
-    pts = subdivide_long_segments(pts, max_step_deg=0.25)
+    pts = subdivide_long_segments(pts, max_step_deg=0.1)
     p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
     p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
     ext_pts = [p_start] + pts + [p_end]
@@ -497,39 +553,7 @@ def simplify_line(coords, tolerance=0.002):
         return coords
 
 
-def remove_d_spikes(pts, is_japan):
-    if len(pts) < 3:
-        return pts
-    
-    cleaned = [pts[0]]
-    for i in range(1, len(pts) - 1):
-        prev_p = cleaned[-1]
-        curr_p = pts[i]
-        next_p = pts[i + 1]
-        
-        v1x, v1y = curr_p[0] - prev_p[0], curr_p[1] - prev_p[1]
-        v2x, v2y = next_p[0] - curr_p[0], next_p[1] - curr_p[1]
-        
-        norm1 = math.hypot(v1x, v1y)
-        norm2 = math.hypot(v2x, v2y)
-        
-        if norm1 > 0 and norm2 > 0:
-            cos_theta = (v1x * v2x + v1y * v2y) / (norm1 * norm2)
-            if cos_theta < SPIKE_COS_THETA and norm1 > SPIKE_LEG_MIN_DEG and norm2 > SPIKE_LEG_MIN_DEG:
-                if not route_crosses_land([prev_p, next_p]):
-                    continue
-                
-        cleaned.append(curr_p)
-        
-    cleaned.append(pts[-1])
-    return cleaned
-
-
 def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
-    """
-    ミクロ処理（2点間の補間）：ここではまだスプラインを掛けず、単なる「折れ線」を返す。
-    ルート全体の結合が終わったあとに一括でスプラインを掛けるため。
-    """
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     is_japan = is_japan_coast(p1[0], p1[1]) or is_japan_coast(p2[0], p2[1])
     
@@ -538,48 +562,55 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
 
     if not direct_crosses and not direct_northern:
         if not is_japan:
-            # 南アフリカ・外洋エリア: 約166km(1.5度)未満なら直結優先
             if straight_dist < 1.5:
                 return [p1, p2]
         else:
-            # 日本周辺エリア: 島影の見落としを完全に防ぐため、約5.5km(0.05度)未満のみ直結優先
-            if straight_dist < 0.05:
+            if straight_dist < 0.03:
                 return [p1, p2]
                 
     res = query_valid_searoute(p1, p2)
     
     if not res:
-        if not direct_crosses and not direct_northern:
-            return [p1, p2]
-        else:
-            if straight_dist < 2.5:
-                return [p1, p2]
+        if is_japan:
+            if straight_dist < 0.03: return [p1, p2]
             return None
+        else:
+            if not direct_crosses and not direct_northern: return [p1, p2]
+            else:
+                if straight_dist < 2.5: return [p1, p2]
+                return None
 
     if not is_port_route:
-        res = remove_d_spikes(res, is_japan)
+        # ★ ここでサブ航路（引き締め）を適用しコの字スパイクを排除
+        res = optimize_sub_route(res, is_japan)
+            
         if len(res) < 2:
             res = [p1, p2]
 
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
 
-        detour_limit = 2.0 if not is_japan else 3.0
-        excess_limit = 0.4 if not is_japan else 0.6
+        detour_limit = 4.0 if is_japan else 2.0
+        excess_limit = 1.0 if is_japan else 0.4
+        
         if route_dist > (straight_dist * detour_limit) and (route_dist - straight_dist) > excess_limit:
-            if not direct_crosses and not direct_northern:
-                res = [p1, p2]
+            if is_japan:
+                return None
             else:
-                if straight_dist < 2.5: res = [p1, p2]
-                else: return None
+                if not direct_crosses and not direct_northern: res = [p1, p2]
+                else:
+                    if straight_dist < 2.5: res = [p1, p2]
+                    else: return None
 
         if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
             speed_knots = (route_dist * 60.0) / time_diff_hrs
             if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                if not direct_crosses and not direct_northern:
-                    res = [p1, p2]
+                if is_japan:
+                    return None
                 else:
-                    if straight_dist < 2.5: res = [p1, p2]
-                    else: return None
+                    if not direct_crosses and not direct_northern: res = [p1, p2]
+                    else:
+                        if straight_dist < 2.5: res = [p1, p2]
+                        else: return None
 
     if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
         res.insert(0, p1)
@@ -871,7 +902,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             time_diff_hrs = (curr_t - prev_t).total_seconds() / 3600.0 if prev_t != datetime.min else 0
             
-            # 各セグメントは直線（折れ線）のままブロックに追加
             interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
@@ -915,11 +945,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = raw_coords
             
-            # ★ 最終プロセス：ルート全体を一括してスプライン曲線で滑らかに平均化する
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
-            
-            # 曲線化によって陸切りや北方領土侵犯が起きた場合は、安全確認済みの元の折れ線に戻す
             if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
                 smoothed = sub_sampled
                 
