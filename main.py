@@ -274,12 +274,10 @@ async def collect_ais_data(target_mmsis, bboxes):
 
 
 def is_japan_coast(lat, lng):
-    """日本周辺の入り組んだ海域か判定"""
     return 20.0 <= lat <= 46.0 and 122.0 <= lng <= 149.0
 
 
 def intersects_northern_territories(coords):
-    """北方領土周辺（根室海峡〜国後・択捉周辺）の通過判定"""
     for i in range(len(coords) - 1):
         a = coords[i]
         b = coords[i + 1]
@@ -306,17 +304,14 @@ def get_offshore_candidates(pt):
 
 
 def get_searoute_path(p1, p2):
-    """searouteの内部ネットワークを信頼して陸切りを防ぐ"""
     try:
         route = sr.searoute((p1[1], p1[0]), (p2[1], p2[0]))
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            
             if len(res) > 2:
                 return res
             
-            # 直線が返ってきた場合の沖合リトライ（港奥のスナップ失敗救済）
             cands1 = get_offshore_candidates(p1)
             cands2 = get_offshore_candidates(p2)
             for o1 in cands1:
@@ -328,8 +323,6 @@ def get_searoute_path(p1, p2):
                             return [p1] + [[round(c[1], 4), round(c[0], 4)] for c in alt_coords] + [p2]
                     except Exception:
                         pass
-            
-            # リトライしても直線の場合は外洋と判断して採用
             return res
     except Exception:
         pass
@@ -337,7 +330,6 @@ def get_searoute_path(p1, p2):
 
 
 def reroute_via_straits(p1, p2):
-    """北方領土を回避して津軽海峡または宗谷海峡を強制経由させる"""
     best_alt = None
     best_alt_dist = float('inf')
     for via in [TSUGARU_STRAIT, SOYA_STRAIT]:
@@ -450,43 +442,49 @@ def simplify_line(coords, tolerance=0.002):
 
 def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    
-    # 日本周辺かどうかのエリア判定
     is_japan = is_japan_coast(p1[0], p1[1]) or is_japan_coast(p2[0], p2[1])
     
-    # ■ エリア別スキームの切り替え ■
-    
-    # 1. 日本周辺（主要航路優先）
+    # 1. 日本周辺（主要航路優先・陸切り完全防止）
     if is_japan:
-        if straight_dist < 0.05: # 約5.5km未満の極近距離のみ直線スプライン
+        if straight_dist < 0.05: 
             return catmull_rom_chain([p1, p2])
-            
         res = query_valid_searoute(p1, p2)
         if not res:
             return None # 陸切り防止のため切断
             
-    # 2. 南アフリカ周辺・外洋（直線スプライン優先）
+    # 2. 南アフリカ・外洋（スプライン優先・長距離の強制切断あり）
     else:
-        if straight_dist < 0.8: # 約89km未満のギャップは直線スプラインで繋ぐ
+        if straight_dist < 0.8: # 約89km未満のギャップは直線スプラインで綺麗に繋ぐ
             return catmull_rom_chain([p1, p2])
             
         res = query_valid_searoute(p1, p2)
+        
+        # ★ 今回の修正: searouteが失敗した場合の救済上限を設ける
         if not res:
-            # 外洋の超長距離でsearouteが失敗した場合でも、直線で繋ぐ（切断しない）
-            return catmull_rom_chain([p1, p2])
+            if straight_dist < 2.5:
+                # 2.5度(約277km)未満なら外洋の可能性が高いので直線救済
+                return catmull_rom_chain([p1, p2])
+            else:
+                # 2.5度以上で経路が見つからない場合、巨大な大陸を横切っているため完全に切断する
+                return None
 
-    # 共通の大回りスパイク・ワープ検知ロジック
+    # スパイク・ワープ検知ロジック
     if not is_port_route:
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
 
         if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
-            if not is_japan: return catmull_rom_chain([p1, p2]) # 外洋なら直線フォールバック
+            if not is_japan: 
+                # 大回りスパイクを避けて直線を引くが、超長距離(大陸越え)なら切断
+                if straight_dist < 2.5: return catmull_rom_chain([p1, p2])
+                else: return None
             return None
 
         if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
             speed_knots = (route_dist * 60.0) / time_diff_hrs
             if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                if not is_japan: return catmull_rom_chain([p1, p2])
+                if not is_japan:
+                    if straight_dist < 2.5: return catmull_rom_chain([p1, p2])
+                    else: return None
                 return None
 
     if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
