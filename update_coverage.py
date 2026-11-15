@@ -21,7 +21,6 @@ CURRENT_YEAR = datetime.now(timezone.utc).year
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 
 LISTEN_DURATION = 300  
-# ★ 基地局の有効期限を180日（半年）に設定
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
 def get_spreadsheet_client():
@@ -129,7 +128,6 @@ def generate_coverage_polygon(coords):
     }
     return geojson_feature
 
-# ★ JSONデータと全く同じ内容をスプレッドシートにバックアップ
 def backup_coverage_to_spreadsheet(active_points):
     client = get_spreadsheet_client()
     if not client:
@@ -153,13 +151,13 @@ def backup_coverage_to_spreadsheet(active_points):
     except Exception as e:
         print(f"Failed to backup to spreadsheet: {e}")
 
-
-# ★ 新機能：実測点の密度を集計し、適用すべきアルゴリズムをスプレッドシートに整理・出力する
 def update_algorithm_map(active_points):
+    """
+    実測点の密度と、北方領土回避フラグ、および人間の「備考」をシートに集計・統合する処理
+    """
     client = get_spreadsheet_client()
     if not client: return
     
-    # 2度×2度（約200km四方）のメッシュでポイント数を集計
     GRID_SIZE = 2.0
     mesh_counts = defaultdict(int)
     for (lat, lng), ts in active_points.items():
@@ -174,32 +172,61 @@ def update_algorithm_map(active_points):
         except:
             ws_algo = wb.add_worksheet("Algorithm_Map", 5000, 10)
             
-        # 既存シートにある人間の「手動設定（オーバーライド）」を消さずに保持するための処理
+        # 既存シートの手動設定や「備考」テキストを読み込んで保持
         existing_data = ws_algo.get_all_records()
-        override_dict = {}
+        override_algo_dict = {}
+        override_avoid_dict = {}
+        remarks_dict = {} # ★ 備考の保持用
+        
         for row in existing_data:
             try:
                 k = (float(row.get("Lat_Block", 0)), float(row.get("Lng_Block", 0)))
-                if row.get("Manual_Override"):
-                    override_dict[k] = str(row.get("Manual_Override")).strip()
+                
+                # アルゴリズムの手動設定
+                algo_val = str(row.get("Manual_Algorithm", "")).strip()
+                if not algo_val and "Manual_Override" in row:
+                    algo_val = str(row.get("Manual_Override", "")).strip()
+                if algo_val:
+                    override_algo_dict[k] = algo_val
+                
+                # 北方領土回避の手動設定
+                avoid_val = str(row.get("Manual_Avoid_Northern", "")).strip().upper()
+                if avoid_val in ("TRUE", "FALSE"):
+                    override_avoid_dict[k] = avoid_val
+                    
+                # 備考欄の保持
+                remark_val = str(row.get("備考", "")).strip()
+                if remark_val:
+                    remarks_dict[k] = remark_val
             except Exception:
                 pass
                 
         ws_algo.clear()
-        rows = [["Lat_Block", "Lng_Block", "Point_Count", "Auto_Algorithm", "Manual_Override"]]
         
-        # 密度に基づいてエリアごとのアルゴリズムを自動判定
-        for (lat_b, lng_b), count in sorted(mesh_counts.items(), key=lambda x: (x[0][0], x[0][1])):
-            # 実測点が3つ以上あるエリアは「測定点ベース」、少ないエリアは「主要航路ベース」
+        # ヘッダーに備考を追加
+        headers = ["Lat_Block", "Lng_Block", "Point_Count", "Auto_Algorithm", "Auto_Avoid_Northern", "Manual_Algorithm", "Manual_Avoid_Northern", "備考"]
+        rows = [headers]
+        
+        all_blocks = set(mesh_counts.keys()).union(set(override_algo_dict.keys())).union(set(override_avoid_dict.keys())).union(set(remarks_dict.keys()))
+        
+        for (lat_b, lng_b) in sorted(all_blocks, key=lambda x: (x[0], x[1])):
+            count = mesh_counts.get((lat_b, lng_b), 0)
+            
+            # 自動判定ロジック
             auto_algo = "測定点ベース" if count >= 3 else "主要航路ベース"
-            manual_setting = override_dict.get((lat_b, lng_b), "")
-            rows.append([lat_b, lng_b, count, auto_algo, manual_setting])
+            auto_avoid = "TRUE" if (42.0 <= lat_b <= 46.0 and 144.0 <= lng_b <= 148.0) else "FALSE"
+            
+            # 手動上書きロジック
+            manual_algo = override_algo_dict.get((lat_b, lng_b), "")
+            manual_avoid = override_avoid_dict.get((lat_b, lng_b), "")
+            remark_text = remarks_dict.get((lat_b, lng_b), "")
+            
+            rows.append([lat_b, lng_b, count, auto_algo, auto_avoid, manual_algo, manual_avoid, remark_text])
             
         ws_algo.append_rows(rows)
         print(f"Algorithm Map successfully updated with {len(rows)-1} areas.")
     except Exception as e:
         print(f"Failed to update Algorithm Map: {e}")
-
 
 def main():
     current_time = time.time()
@@ -241,10 +268,7 @@ def main():
     with open(POINTS_FILE, "w", encoding="utf-8") as f:
         json.dump(merged_points, f, ensure_ascii=False)
         
-    # JSON生成と同時にスプレッドシートへバックアップ
     backup_coverage_to_spreadsheet(active_points)
-    
-    # ★ 新機能：バックアップ後に、アルゴリズム判定マップを作成して整理する
     update_algorithm_map(active_points)
 
     if active_points:
