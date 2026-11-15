@@ -23,6 +23,19 @@ except ImportError:
     from shapely.geometry import Point, mapping, LineString
     from shapely.ops import unary_union
 
+try:
+    from global_land_mask import globe
+    import numpy as np
+    HAS_LAND_MASK = True
+except ImportError:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "global-land-mask", "numpy"])
+        from global_land_mask import globe
+        import numpy as np
+        HAS_LAND_MASK = True
+    except Exception:
+        HAS_LAND_MASK = False
+
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
@@ -37,10 +50,13 @@ COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
 
+GAP_THRESHOLD_DEG       = 0.05
 MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
 MAX_DETOUR_RATIO        = 3.0
 MAX_EXCESS_DETOUR_DEG   = 0.6
+SPIKE_COS_THETA         = -0.8
+SPIKE_LEG_MIN_DEG       = 0.45
 
 TSUGARU_STRAIT = [41.45, 140.55]
 SOYA_STRAIT    = [45.65, 141.95]
@@ -277,6 +293,45 @@ def is_japan_coast(lat, lng):
     return 20.0 <= lat <= 46.0 and 122.0 <= lng <= 149.0
 
 
+def is_point_on_land(lat, lng):
+    if not HAS_LAND_MASK:
+        return False
+    try:
+        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
+            return bool(globe.is_land(lat, lng))
+    except Exception:
+        pass
+    return False
+
+
+def route_crosses_land(coords):
+    if not HAS_LAND_MASK or len(coords) < 2:
+        return False
+
+    p_start = coords[0]
+    p_end = coords[-1]
+
+    for i in range(len(coords) - 1):
+        a = coords[i]
+        b = coords[i + 1]
+        dist = math.hypot(b[0] - a[0], b[1] - a[1])
+        if dist == 0: continue
+        
+        steps = max(2, int(math.ceil(dist / 0.005)))
+        for s in range(1, steps):
+            t = s / float(steps)
+            lat = a[0] + (b[0] - a[0]) * t
+            lng = a[1] + (b[1] - a[1]) * t
+            
+            if math.hypot(lat - p_start[0], lng - p_start[1]) < 0.01: continue
+            if math.hypot(lat - p_end[0], lng - p_end[1]) < 0.01: continue
+            
+            if is_point_on_land(lat, lng):
+                return True
+                
+    return False
+
+
 def intersects_northern_territories(coords):
     for i in range(len(coords) - 1):
         a = coords[i]
@@ -299,7 +354,9 @@ def get_offshore_candidates(pt):
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
     for radius in (0.05, 0.1, 0.2):
         for dy, dx in dirs:
-            candidates.append([round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)])
+            n_lat, n_lng = round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)
+            if not is_point_on_land(n_lat, n_lng):
+                candidates.append([n_lat, n_lng])
     return candidates
 
 
@@ -440,52 +497,89 @@ def simplify_line(coords, tolerance=0.002):
         return coords
 
 
+def remove_d_spikes(pts):
+    if len(pts) < 3:
+        return pts
+    
+    cleaned = [pts[0]]
+    for i in range(1, len(pts) - 1):
+        prev_p = cleaned[-1]
+        curr_p = pts[i]
+        next_p = pts[i + 1]
+        
+        v1x, v1y = curr_p[0] - prev_p[0], curr_p[1] - prev_p[1]
+        v2x, v2y = next_p[0] - curr_p[0], next_p[1] - curr_p[1]
+        
+        norm1 = math.hypot(v1x, v1y)
+        norm2 = math.hypot(v2x, v2y)
+        
+        if norm1 > 0 and norm2 > 0:
+            cos_theta = (v1x * v2x + v1y * v2y) / (norm1 * norm2)
+            if cos_theta < SPIKE_COS_THETA and norm1 > SPIKE_LEG_MIN_DEG and norm2 > SPIKE_LEG_MIN_DEG:
+                if not route_crosses_land([prev_p, next_p]):
+                    continue
+                
+        cleaned.append(curr_p)
+        
+    cleaned.append(pts[-1])
+    return cleaned
+
+
 def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     is_japan = is_japan_coast(p1[0], p1[1]) or is_japan_coast(p2[0], p2[1])
     
-    # 1. 日本周辺（主要航路優先・陸切り完全防止）
-    if is_japan:
-        if straight_dist < 0.05: 
-            return catmull_rom_chain([p1, p2])
-        res = query_valid_searoute(p1, p2)
-        if not res:
-            return None # 陸切り防止のため切断
-            
-    # 2. 南アフリカ・外洋（スプライン優先・長距離の強制切断あり）
-    else:
-        if straight_dist < 0.8: # 約89km未満のギャップは直線スプラインで綺麗に繋ぐ
-            return catmull_rom_chain([p1, p2])
-            
-        res = query_valid_searoute(p1, p2)
-        
-        # ★ 今回の修正: searouteが失敗した場合の救済上限を設ける
-        if not res:
-            if straight_dist < 2.5:
-                # 2.5度(約277km)未満なら外洋の可能性が高いので直線救済
-                return catmull_rom_chain([p1, p2])
-            else:
-                # 2.5度以上で経路が見つからない場合、巨大な大陸を横切っているため完全に切断する
-                return None
+    direct_crosses = route_crosses_land([p1, p2])
+    direct_northern = intersects_northern_territories([p1, p2])
 
-    # スパイク・ワープ検知ロジック
+    # ★ 今回の修正: コの字スパイク排除（実測結びの最優先）
+    # 陸を切らず、北方領土も通らないなら、不要な主要航路補完を行わずに直線を信用する。
+    if not direct_crosses and not direct_northern:
+        if not is_japan:
+            # 南アフリカ・外洋エリア: コの字スパイクを完全に防ぐため、どんな距離でも実測直結を優先
+            return catmull_rom_chain([p1, p2])
+        else:
+            # 日本沿岸エリア: 島影の見落としリスクを考慮し、約111km未満に限り直結を優先
+            if straight_dist < 1.0:
+                return catmull_rom_chain([p1, p2])
+                
+    # 直線だと陸地をクロスする場合、または日本沿岸の長距離ギャップの場合のみsearouteを呼び出す
+    res = query_valid_searoute(p1, p2)
+    
+    if not res:
+        if not direct_crosses and not direct_northern:
+            return catmull_rom_chain([p1, p2])
+        else:
+            if straight_dist < 2.5:
+                return catmull_rom_chain([p1, p2])
+            return None
+
     if not is_port_route:
+        res = remove_d_spikes(res)
+        if len(res) < 2:
+            res = [p1, p2]
+
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
 
-        if route_dist > (straight_dist * MAX_DETOUR_RATIO) and (route_dist - straight_dist) > MAX_EXCESS_DETOUR_DEG:
-            if not is_japan: 
-                # 大回りスパイクを避けて直線を引くが、超長距離(大陸越え)なら切断
-                if straight_dist < 2.5: return catmull_rom_chain([p1, p2])
+        # コの字スパイクの最終防衛線:
+        # searouteが返した迂回ルートが直線距離に対して大回りすぎる(外洋は2.0倍以上)場合は破棄
+        detour_limit = 2.0 if not is_japan else 3.0
+        excess_limit = 0.4 if not is_japan else 0.6
+        if route_dist > (straight_dist * detour_limit) and (route_dist - straight_dist) > excess_limit:
+            if not direct_crosses and not direct_northern:
+                res = [p1, p2]
+            else:
+                if straight_dist < 2.5: res = [p1, p2]
                 else: return None
-            return None
 
         if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
             speed_knots = (route_dist * 60.0) / time_diff_hrs
             if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-                if not is_japan:
-                    if straight_dist < 2.5: return catmull_rom_chain([p1, p2])
+                if not direct_crosses and not direct_northern:
+                    res = [p1, p2]
+                else:
+                    if straight_dist < 2.5: res = [p1, p2]
                     else: return None
-                return None
 
     if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
         res.insert(0, p1)
