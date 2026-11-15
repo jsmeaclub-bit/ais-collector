@@ -497,7 +497,7 @@ def simplify_line(coords, tolerance=0.002):
         return coords
 
 
-def remove_d_spikes(pts):
+def remove_d_spikes(pts, is_japan):
     if len(pts) < 3:
         return pts
     
@@ -525,44 +525,44 @@ def remove_d_spikes(pts):
     return cleaned
 
 
-def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
+def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
+    """
+    ミクロ処理（2点間の補間）：ここではまだスプラインを掛けず、単なる「折れ線」を返す。
+    ルート全体の結合が終わったあとに一括でスプラインを掛けるため。
+    """
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     is_japan = is_japan_coast(p1[0], p1[1]) or is_japan_coast(p2[0], p2[1])
     
     direct_crosses = route_crosses_land([p1, p2])
     direct_northern = intersects_northern_territories([p1, p2])
 
-    # ★ 今回の修正: コの字スパイク排除（実測結びの最優先）
-    # 陸を切らず、北方領土も通らないなら、不要な主要航路補完を行わずに直線を信用する。
     if not direct_crosses and not direct_northern:
         if not is_japan:
-            # 南アフリカ・外洋エリア: コの字スパイクを完全に防ぐため、どんな距離でも実測直結を優先
-            return catmull_rom_chain([p1, p2])
+            # 南アフリカ・外洋エリア: 約166km(1.5度)未満なら直結優先
+            if straight_dist < 1.5:
+                return [p1, p2]
         else:
-            # 日本沿岸エリア: 島影の見落としリスクを考慮し、約111km未満に限り直結を優先
-            if straight_dist < 1.0:
-                return catmull_rom_chain([p1, p2])
+            # 日本周辺エリア: 島影の見落としを完全に防ぐため、約5.5km(0.05度)未満のみ直結優先
+            if straight_dist < 0.05:
+                return [p1, p2]
                 
-    # 直線だと陸地をクロスする場合、または日本沿岸の長距離ギャップの場合のみsearouteを呼び出す
     res = query_valid_searoute(p1, p2)
     
     if not res:
         if not direct_crosses and not direct_northern:
-            return catmull_rom_chain([p1, p2])
+            return [p1, p2]
         else:
             if straight_dist < 2.5:
-                return catmull_rom_chain([p1, p2])
+                return [p1, p2]
             return None
 
     if not is_port_route:
-        res = remove_d_spikes(res)
+        res = remove_d_spikes(res, is_japan)
         if len(res) < 2:
             res = [p1, p2]
 
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
 
-        # コの字スパイクの最終防衛線:
-        # searouteが返した迂回ルートが直線距離に対して大回りすぎる(外洋は2.0倍以上)場合は破棄
         detour_limit = 2.0 if not is_japan else 3.0
         excess_limit = 0.4 if not is_japan else 0.6
         if route_dist > (straight_dist * detour_limit) and (route_dist - straight_dist) > excess_limit:
@@ -590,11 +590,7 @@ def interpolate_sea_route(p1, p2, time_diff_hrs=None, is_port_route=False, prev_
     else:
         res[-1] = p2
 
-    smoothed = catmull_rom_chain(res)
-    if intersects_northern_territories(smoothed):
-        return res
-        
-    return smoothed
+    return res
 
 
 def generate_inferred_port_route(ship_history, current_pos, current_ts, current_dest, port_dict):
@@ -648,11 +644,11 @@ def generate_inferred_port_route(ship_history, current_pos, current_ts, current_
         
     inferred_route_coords = []
     try:
-        c1_list = interpolate_sea_route(past_received_pos, port_pos, is_port_route=True)
+        c1_list = interpolate_sea_route_linear(past_received_pos, port_pos, is_port_route=True)
         if not c1_list:
             return None
         inferred_route_coords.extend(c1_list)
-        c2_list = interpolate_sea_route(port_pos, current_pos, is_port_route=True)
+        c2_list = interpolate_sea_route_linear(port_pos, current_pos, is_port_route=True)
         if not c2_list:
             return None
         inferred_route_coords.extend(c2_list[1:])
@@ -875,18 +871,18 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
             time_diff_hrs = (curr_t - prev_t).total_seconds() / 3600.0 if prev_t != datetime.min else 0
             
-            if abs(curr_p[0] - prev_p[0]) > 0.02 or abs(curr_p[1] - prev_p[1]) > 0.02:
+            # 各セグメントは直線（折れ線）のままブロックに追加
+            interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
+            
+            if interpolated and len(interpolated) >= 2:
                 if len(curr_sub) >= 2:
                     ordered_blocks.append(curr_sub)
-                
-                interpolated = interpolate_sea_route(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
-                
-                if interpolated and len(interpolated) >= 2:
-                    ordered_blocks.append(interpolated)
-                
+                ordered_blocks.append(interpolated)
                 curr_sub = [curr_p]
             else:
-                curr_sub.append(curr_p)
+                if len(curr_sub) >= 2:
+                    ordered_blocks.append(curr_sub)
+                curr_sub = [curr_p]
 
         if len(curr_sub) >= 2:
             ordered_blocks.append(curr_sub)
@@ -919,10 +915,14 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = raw_coords
             
+            # ★ 最終プロセス：ルート全体を一括してスプライン曲線で滑らかに平均化する
             smoothed = catmull_rom_chain(sub_sampled)
             smoothed = simplify_line(smoothed, tolerance=0.0015)
-            if intersects_northern_territories(smoothed):
+            
+            # 曲線化によって陸切りや北方領土侵犯が起きた場合は、安全確認済みの元の折れ線に戻す
+            if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
                 smoothed = sub_sampled
+                
             if len(smoothed) >= 2:
                 processed_blocks.append(smoothed)
 
