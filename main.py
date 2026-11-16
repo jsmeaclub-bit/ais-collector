@@ -107,16 +107,14 @@ def load_algorithm_map(client):
 
 def is_complex_coast(lat, lng):
     """
-    特定海域を強制的に「主要航路（searoute）」にする絶対安全装置
+    特定海域を強制的に「主要航路（searoute）」にする絶対安全装置。
+    南アフリカ沖は経度20度を境界に、東側（インド洋側）のみ主要航路を強制する。
     """
     if 30.0 <= lat <= 46.0 and 128.0 <= lng <= 146.0: return True
     if -10.0 <= lat <= 15.0 and 95.0 <= lng <= 120.0: return True
     if 48.0 <= lat <= 55.0 and -6.0 <= lng <= 10.0: return True
-    
-    # ★ 変更点：アフリカ大陸を東西に分割。
-    # アグラス岬（経度20度）より「東側」だけを主要航路強制とし、西側はA*探索を許可する。
+    # アフリカ東側（インド洋側）を主要航路強制
     if -40.0 <= lat <= 15.0 and 20.0 <= lng <= 55.0: return True
-    
     return False
 
 
@@ -364,7 +362,19 @@ def is_point_on_land(lat, lng):
     return False
 
 
-def route_crosses_land(coords):
+def is_point_on_land_with_buffer(lat, lng, buffer_deg=0.1):
+    """
+    陸地への接近を防ぐ安全バリア（約11kmのバッファ）
+    """
+    if is_point_on_land(lat, lng): return True
+    if is_point_on_land(lat + buffer_deg, lng): return True
+    if is_point_on_land(lat - buffer_deg, lng): return True
+    if is_point_on_land(lat, lng + buffer_deg): return True
+    if is_point_on_land(lat, lng - buffer_deg): return True
+    return False
+
+
+def route_crosses_land(coords, use_buffer=False):
     if not HAS_LAND_MASK or len(coords) < 2:
         return False
 
@@ -386,8 +396,12 @@ def route_crosses_land(coords):
             if math.hypot(lat - p_start[0], lng - p_start[1]) < 0.01: continue
             if math.hypot(lat - p_end[0], lng - p_end[1]) < 0.01: continue
             
-            if is_point_on_land(lat, lng):
-                return True
+            if use_buffer:
+                if is_point_on_land_with_buffer(lat, lng, buffer_deg=0.1):
+                    return True
+            else:
+                if is_point_on_land(lat, lng):
+                    return True
                 
     return False
 
@@ -453,7 +467,7 @@ def get_searoute_path(p1, p2):
     return None
 
 
-def string_pull_path(path, max_lookahead=6):
+def string_pull_path(path, max_lookahead=6, use_buffer=False):
     if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
@@ -463,12 +477,27 @@ def string_pull_path(path, max_lookahead=6):
         furthest_visible_idx = current_idx + 1
         search_end = min(len(path) - 1, current_idx + max_lookahead)
         for check_idx in range(search_end, current_idx, -1):
-            if not route_crosses_land([path[current_idx], path[check_idx]]) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+            if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
                 furthest_visible_idx = check_idx
                 break
         smoothed_path.append(path[furthest_visible_idx])
         current_idx = furthest_visible_idx
     return smoothed_path
+
+
+def moving_average_smooth(path, window_size=7):
+    if len(path) < window_size:
+        return path
+    smoothed = [path[0]]
+    for i in range(1, len(path)-1):
+        start = max(0, i - window_size // 2)
+        end = min(len(path), i + window_size // 2 + 1)
+        window = path[start:end]
+        avg_lat = sum(p[0] for p in window) / len(window)
+        avg_lng = sum(p[1] for p in window) / len(window)
+        smoothed.append([avg_lat, avg_lng])
+    smoothed.append(path[-1])
+    return smoothed
 
 
 def get_crowd_sourced_path(p1, p2):
@@ -503,7 +532,14 @@ def get_crowd_sourced_path(p1, p2):
                     path.append([round(curr_node[0]*resolution, 4), round(curr_node[1]*resolution, 4)])
             path.append(p1)
             path.reverse()
-            return path
+            
+            if len(path) <= 2:
+                return path
+                
+            smoothed_path = moving_average_smooth(path, window_size=9)
+            
+            # 視界制限を999（無制限）に解放し、外洋のジグザグを綺麗な直線にアイロンがけする
+            return string_pull_path(smoothed_path, max_lookahead=999, use_buffer=False)
             
         open_set.remove(current)
         
@@ -652,19 +688,21 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
             return [p1, p2]
         res = query_valid_searoute(p1, p2)
         if res:
-            res = string_pull_path(res, max_lookahead=12)
+            res = subdivide_long_segments(res, max_step_deg=0.1)
+            # 主要航路の引き締め時に「陸地バリア」を有効化し、海岸線張り付きを防ぐ
+            res = string_pull_path(res, max_lookahead=15, use_buffer=True)
     else:
         if straight_dist < 1.5 and not direct_crosses and not direct_northern:
             return [p1, p2]
             
         crowd_res = get_crowd_sourced_path(p1, p2)
         if crowd_res and not route_crosses_land(crowd_res) and not intersects_northern_territories(crowd_res):
-            res = string_pull_path(crowd_res, max_lookahead=8)
+            res = crowd_res
         else:
             res = query_valid_searoute(p1, p2)
             if res:
                 res = subdivide_long_segments(res, max_step_deg=0.1)
-                res = string_pull_path(res, max_lookahead=15)
+                res = string_pull_path(res, max_lookahead=15, use_buffer=True)
                 
         if not res:
             if not direct_crosses and not direct_northern:
