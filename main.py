@@ -107,15 +107,16 @@ def load_algorithm_map(client):
 
 def is_complex_coast(lat, lng):
     """
-    ★ 新機能: スプレッドシートの設定漏れを防ぐための絶対安全装置。
-    日本沿岸や東南アジア（マラッカ海峡等）の複雑な地形は強制的に主要航路ベースにする。
+    特定海域を強制的に「主要航路（searoute）」にする絶対安全装置
     """
-    # 日本周辺 (瀬戸内海・東京湾など)
     if 30.0 <= lat <= 46.0 and 128.0 <= lng <= 146.0: return True
-    # 東南アジア (マラッカ海峡・シンガポール・インドネシア周辺)
     if -10.0 <= lat <= 15.0 and 95.0 <= lng <= 120.0: return True
-    # ヨーロッパ (イギリス海峡・北海など)
     if 48.0 <= lat <= 55.0 and -6.0 <= lng <= 10.0: return True
+    
+    # ★ 変更点：アフリカ大陸を東西に分割。
+    # アグラス岬（経度20度）より「東側」だけを主要航路強制とし、西側はA*探索を許可する。
+    if -40.0 <= lat <= 15.0 and 20.0 <= lng <= 55.0: return True
+    
     return False
 
 
@@ -489,7 +490,7 @@ def get_crowd_sourced_path(p1, p2):
     f_score = {start_gk: heuristic(start_gk)}
     
     iterations = 0
-    while open_set and iterations < 15000:
+    while open_set and iterations < 20000:
         iterations += 1
         current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
         
@@ -608,15 +609,9 @@ def subdivide_long_segments(coords, max_step_deg=0.5):
 
 
 def smooth_path_chaikin(coords, iterations=3):
-    """
-    ★ 究極の改善：Chaikinの角切りアルゴリズム。
-    スプライン曲線のように陸地へオーバーシュート（暴走）することが絶対にない、
-    地図アプリの業界標準の非常に安全かつ美しいスムージング手法です。
-    """
     if len(coords) < 3:
         return coords
         
-    # 重複ポイントを除去
     pts = [coords[0]]
     for c in coords[1:]:
         if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
@@ -625,7 +620,6 @@ def smooth_path_chaikin(coords, iterations=3):
     if len(pts) < 3:
         return pts
         
-    # 長い直線を適度に分割し、角が綺麗に丸まるようにする
     coords = subdivide_long_segments(pts, max_step_deg=0.5)
 
     for _ in range(iterations):
@@ -669,11 +663,10 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
         else:
             res = query_valid_searoute(p1, p2)
             if res:
-                res = string_pull_path(res, max_lookahead=12)
+                res = subdivide_long_segments(res, max_step_deg=0.1)
+                res = string_pull_path(res, max_lookahead=15)
                 
         if not res:
-            # ★ 改善: ルートが見つからず、かつ直線を引くと陸にぶつかる場合は
-            # 「None」を返し、クモの巣のような直線を引かせない。
             if not direct_crosses and not direct_northern:
                 if straight_dist < 1.5:  
                     return [p1, p2]
@@ -1002,7 +995,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # ★ 改善: クモの巣化を防ぐため、エラー（None）になったら結合を断ち切り、新たなブロックを作る。
         ordered_blocks = []
         curr_block = [cleaned_list[0][1]]
 
@@ -1014,13 +1006,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
-                # 成功した場合はブロックに繋げる
                 for pt in interpolated[1:]:
                     if abs(pt[0] - curr_block[-1][0]) > 1e-6 or abs(pt[1] - curr_block[-1][1]) > 1e-6:
                         curr_block.append(pt)
             else:
-                # 失敗した場合（陸地横断などでルートが見つからない場合）は、
-                # 強引に直線を引かずに現在のブロックを完了させ、新しいブロックを開始する！
                 if len(curr_block) >= 2:
                     ordered_blocks.append(curr_block)
                 curr_block = [curr_p]
@@ -1050,7 +1039,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = raw_coords
                 
-            # ★ 改善: Catmull-Romの暴走を捨て、安全・確実なChaikinアルゴリズムで滑らかにする
             smoothed = smooth_path_chaikin(sub_sampled, iterations=3)
             
             if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
