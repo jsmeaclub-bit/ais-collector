@@ -52,7 +52,6 @@ EXPIRATION_SECONDS = 180 * 24 * 3600
 
 MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
-# V字スパイク（不自然な折れ曲がり）を削り落とすための閾値
 SPIKE_COS_THETA         = -0.3
 SPIKE_LEG_MIN_DEG       = 0.2
 
@@ -74,9 +73,6 @@ def get_spreadsheet_client():
 
 
 def load_algorithm_map(client):
-    """
-    スプレッドシートからエリアごとのアルゴリズム設定と北方領土回避フラグを読み込む
-    """
     global GLOBAL_ALGO_MAP, GLOBAL_AVOID_NORTHERN
     GLOBAL_ALGO_MAP.clear()
     GLOBAL_AVOID_NORTHERN.clear()
@@ -91,7 +87,6 @@ def load_algorithm_map(client):
                 lng_b = float(r.get("Lng_Block", 0))
                 k = (lat_b, lng_b)
                 
-                # アルゴリズム判定 (手動設定を最優先)
                 algo = str(r.get("Manual_Algorithm", "")).strip()
                 if not algo and "Manual_Override" in r:
                     algo = str(r.get("Manual_Override", "")).strip()
@@ -99,7 +94,6 @@ def load_algorithm_map(client):
                     algo = str(r.get("Auto_Algorithm", "")).strip()
                 GLOBAL_ALGO_MAP[k] = algo
                 
-                # 北方領土回避判定 (手動設定を最優先)
                 avoid = str(r.get("Manual_Avoid_Northern", "")).strip().upper()
                 if avoid not in ("TRUE", "FALSE"):
                     avoid = str(r.get("Auto_Avoid_Northern", "")).strip().upper()
@@ -108,14 +102,10 @@ def load_algorithm_map(client):
             except Exception:
                 pass
     except Exception as e:
-        print(f"[WARN] Algorithm_Map could not be loaded: {e}")
+        pass
 
 
 def get_route_algorithm(p1, p2):
-    """
-    始点か終点のどちらかが「主要航路ベース」のエリアであれば主要航路を適用。
-    それ以外（両方とも「測定点ベース」等の外洋）ならA*探索を試みる。
-    """
     k1 = (math.floor(p1[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
           math.floor(p1[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
     k2 = (math.floor(p2[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
@@ -123,7 +113,6 @@ def get_route_algorithm(p1, p2):
           
     if GLOBAL_ALGO_MAP.get(k1) == "主要航路ベース" or GLOBAL_ALGO_MAP.get(k2) == "主要航路ベース":
         return "主要航路ベース"
-        
     return "測定点ベース"
 
 
@@ -386,10 +375,6 @@ def route_crosses_land(coords):
 
 
 def intersects_northern_territories(coords):
-    """
-    スプレッドシートの GLOBAL_AVOID_NORTHERN リストに基づいて回避判定を行う。
-    リストが空の場合は、デフォルトのバウンディングボックスでフォールバック。
-    """
     for i in range(len(coords) - 1):
         a = coords[i]
         b = coords[i + 1]
@@ -451,10 +436,6 @@ def get_searoute_path(p1, p2):
 
 
 def string_pull_path(path, max_lookahead=6):
-    """
-    視界（ルックアヘッド）を引数で動的に変更可能に。
-    A*用にはカーブを残すため小さく（6）、searouteのV字消去用には無限大（999）を設定する。
-    """
     if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
@@ -472,6 +453,21 @@ def string_pull_path(path, max_lookahead=6):
     return smoothed_path
 
 
+def moving_average_smooth(path, window_size=7):
+    if len(path) < window_size:
+        return path
+    smoothed = [path[0]]
+    for i in range(1, len(path)-1):
+        start = max(0, i - window_size // 2)
+        end = min(len(path), i + window_size // 2 + 1)
+        window = path[start:end]
+        avg_lat = sum(p[0] for p in window) / len(window)
+        avg_lng = sum(p[1] for p in window) / len(window)
+        smoothed.append([avg_lat, avg_lng])
+    smoothed.append(path[-1])
+    return smoothed
+
+
 def get_crowd_sourced_path(p1, p2):
     global GLOBAL_SAFE_GRIDS
     resolution = 0.25
@@ -485,7 +481,6 @@ def get_crowd_sourced_path(p1, p2):
     came_from = {}
     g_score = {start_gk: 0}
     
-    # ヒューリスティック係数を1.0にして、欲張ってV字スパイクを作るのを防止
     def heuristic(node):
         return math.hypot(node[0]-end_gk[0], node[1]-end_gk[1]) * 1.0
         
@@ -509,32 +504,25 @@ def get_crowd_sourced_path(p1, p2):
             if len(path) <= 2:
                 return path
                 
-            # 実測点の間引き抽出（サンプリング）によるスプライン制御点の最適化
-            sampled = [path[0]]
-            step = 5 
-            for k in range(step, len(path) - 1, step):
-                sampled.append(path[k])
-            sampled.append(path[-1])
+            smoothed_path = moving_average_smooth(path, window_size=9)
+            
+            sampled = [smoothed_path[0]]
+            step = 6 
+            for k in range(step, len(smoothed_path) - 1, step):
+                sampled.append(smoothed_path[k])
+            sampled.append(smoothed_path[-1])
             
             if not route_crosses_land(sampled) and not intersects_northern_territories(sampled):
                 return sampled
                 
-            sampled = [path[0]]
-            for k in range(2, len(path) - 1, 2):
-                sampled.append(path[k])
-            sampled.append(path[-1])
-            
-            if not route_crosses_land(sampled) and not intersects_northern_territories(sampled):
-                return sampled
-                
-            return string_pull_path(path, max_lookahead=6)
+            return string_pull_path(smoothed_path, max_lookahead=6)
             
         open_set.remove(current)
         
         for dx, dy in [(0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
             neighbor = (current[0]+dx, current[1]+dy)
             dist = math.hypot(dx, dy)
-            penalty = 1.0 if neighbor in GLOBAL_SAFE_GRIDS else 4.0
+            penalty = 1.0 if neighbor in GLOBAL_SAFE_GRIDS else 10.0
             
             if not (neighbor in GLOBAL_SAFE_GRIDS):
                 if is_point_on_land(neighbor[0]*resolution, neighbor[1]*resolution):
@@ -640,6 +628,57 @@ def remove_d_spikes(pts):
     return cleaned
 
 
+def catmull_rom_chain(coords):
+    if len(coords) < 3:
+        return coords
+        
+    pts = [coords[0]]
+    for c in coords[1:]:
+        if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
+            pts.append(c)
+    if len(pts) < 3:
+        return pts
+        
+    p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
+    p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
+    ext_pts = [p_start] + pts + [p_end]
+    
+    alpha = 0.2 
+    result = []
+
+    def tj(ti, pi, pj):
+        dist = math.hypot(pj[0] - pi[0], pj[1] - pi[1])
+        return ti + max(1e-5, dist ** alpha)
+
+    for i in range(len(ext_pts) - 3):
+        p0, p1, p2, p3 = ext_pts[i], ext_pts[i + 1], ext_pts[i + 2], ext_pts[i + 3]
+        t0 = 0.0
+        t1 = tj(t0, p0, p1)
+        t2 = tj(t1, p1, p2)
+        t3 = tj(t2, p2, p3)
+        seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        n_steps = max(10, min(30, int(seg_dist / 0.02) + 5))
+        
+        for step in range(n_steps):
+            t = t1 + (t2 - t1) * (step / float(n_steps))
+            a1 = [(t1 - t) / (t1 - t0) * p0[0] + (t - t0) / (t1 - t0) * p1[0],
+                  (t1 - t) / (t1 - t0) * p0[1] + (t - t0) / (t1 - t0) * p1[1]]
+            a2 = [(t2 - t) / (t2 - t1) * p1[0] + (t - t1) / (t2 - t1) * p2[0],
+                  (t2 - t) / (t2 - t1) * p1[1] + (t - t1) / (t2 - t1) * p2[1]]
+            a3 = [(t3 - t) / (t3 - t2) * p2[0] + (t - t2) / (t3 - t2) * p3[0],
+                  (t3 - t) / (t3 - t2) * p2[1] + (t - t2) / (t3 - t2) * p3[1]]
+            b1 = [(t2 - t) / (t2 - t0) * a1[0] + (t - t0) / (t2 - t0) * a2[0],
+                  (t2 - t) / (t2 - t0) * a1[1] + (t - t0) / (t2 - t0) * a2[1]]
+            b2 = [(t3 - t) / (t3 - t1) * a2[0] + (t - t1) / (t3 - t1) * a3[0],
+                  (t3 - t) / (t3 - t1) * a2[1] + (t - t1) / (t3 - t1) * a3[1]]
+            c = [(t2 - t) / (t2 - t1) * b1[0] + (t - t1) / (t2 - t1) * b2[0],
+                 (t2 - t) / (t2 - t1) * b1[1] + (t - t1) / (t2 - t1) * b2[1]]
+            result.append([round(c[0], 5), round(c[1], 5)])
+            
+    result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
+    return result
+
+
 def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     
@@ -667,7 +706,6 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
         else:
             res = query_valid_searoute(p1, p2)
             if res:
-                # 外洋でsearouteが呼ばれた場合、V字弧を完全除去するため視界999（無限大）で一直線に結び直す
                 res = string_pull_path(res, max_lookahead=999)
                 
         if not res:
@@ -790,73 +828,6 @@ def register_segment_to_grid(p1, p2, mmsi, grid_map, grid_size):
         grid_map[gk].add(mmsi)
         keys.add(gk)
     return list(keys)
-
-
-def subdivide_long_segments(coords, max_step_deg=0.1):
-    if len(coords) < 2:
-        return coords
-    subdivided = [coords[0]]
-    for i in range(1, len(coords)):
-        p1 = subdivided[-1]
-        p2 = coords[i]
-        dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-        if dist > max_step_deg:
-            n = int(math.ceil(dist / max_step_deg))
-            for k in range(1, n):
-                t = k / float(n)
-                subdivided.append([
-                    round(p1[0] + (p2[0] - p1[0]) * t, 5),
-                    round(p1[1] + (p2[1] - p1[1]) * t, 5)
-                ])
-        subdivided.append(p2)
-    return subdivided
-
-
-def catmull_rom_chain(coords):
-    if len(coords) < 2:
-        return coords
-    pts = [coords[0]]
-    for c in coords[1:]:
-        if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
-            pts.append(c)
-    if len(pts) < 3:
-        return pts
-    pts = subdivide_long_segments(pts, max_step_deg=0.1)
-    p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
-    p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
-    ext_pts = [p_start] + pts + [p_end]
-    alpha = 0.5 
-    result = []
-
-    def tj(ti, pi, pj):
-        dist = math.hypot(pj[0] - pi[0], pj[1] - pi[1])
-        return ti + max(1e-5, dist ** alpha)
-
-    for i in range(len(ext_pts) - 3):
-        p0, p1, p2, p3 = ext_pts[i], ext_pts[i + 1], ext_pts[i + 2], ext_pts[i + 3]
-        t0 = 0.0
-        t1 = tj(t0, p0, p1)
-        t2 = tj(t1, p1, p2)
-        t3 = tj(t2, p2, p3)
-        seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-        n_steps = max(6, min(24, int(seg_dist / 0.015) + 4))
-        for step in range(n_steps):
-            t = t1 + (t2 - t1) * (step / float(n_steps))
-            a1 = [(t1 - t) / (t1 - t0) * p0[0] + (t - t0) / (t1 - t0) * p1[0],
-                  (t1 - t) / (t1 - t0) * p0[1] + (t - t0) / (t1 - t0) * p1[1]]
-            a2 = [(t2 - t) / (t2 - t1) * p1[0] + (t - t1) / (t2 - t1) * p2[0],
-                  (t2 - t) / (t2 - t1) * p1[1] + (t - t1) / (t2 - t1) * p2[1]]
-            a3 = [(t3 - t) / (t3 - t2) * p2[0] + (t - t2) / (t3 - t2) * p3[0],
-                  (t3 - t) / (t3 - t2) * p2[1] + (t - t2) / (t3 - t2) * p3[1]]
-            b1 = [(t2 - t) / (t2 - t0) * a1[0] + (t - t0) / (t2 - t0) * a2[0],
-                  (t2 - t) / (t2 - t0) * a1[1] + (t - t0) / (t2 - t0) * a2[1]]
-            b2 = [(t3 - t) / (t3 - t1) * a2[0] + (t - t1) / (t3 - t1) * a3[0],
-                  (t3 - t) / (t3 - t1) * a2[1] + (t - t1) / (t3 - t1) * a3[1]]
-            c = [(t2 - t) / (t2 - t1) * b1[0] + (t - t1) / (t2 - t1) * b2[0],
-                 (t2 - t) / (t2 - t1) * b1[1] + (t - t1) / (t2 - t1) * b2[1]]
-            result.append([round(c[0], 5), round(c[1], 5)])
-    result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
-    return result
 
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict):
@@ -1110,18 +1081,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 else:
                     continue 
 
-            if len(raw_coords) > 200:
-                step = len(raw_coords) / 200.0
-                sub_sampled = [raw_coords[int(j * step)] for j in range(200)]
-                if sub_sampled[-1] != raw_coords[-1]:
-                    sub_sampled.append(raw_coords[-1])
-            else:
-                sub_sampled = raw_coords
-            
-            smoothed = catmull_rom_chain(sub_sampled)
+            smoothed = catmull_rom_chain(raw_coords)
             
             if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
-                smoothed = sub_sampled
+                smoothed = raw_coords
                 
             if len(smoothed) >= 2:
                 processed_blocks.append(smoothed)
@@ -1255,7 +1218,6 @@ def main():
     if not client:
         return
         
-    # ★ スプレッドシートからアルゴリズム設定をロード
     load_algorithm_map(client)
     
     port_dict, existing_ais_names = get_port_dictionary(client)
