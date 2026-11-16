@@ -73,6 +73,9 @@ def get_spreadsheet_client():
 
 
 def load_algorithm_map(client):
+    """
+    スプレッドシートからエリアごとのアルゴリズム設定と回避フラグ（北方領土・竹島等）を読み込む
+    """
     global GLOBAL_ALGO_MAP, GLOBAL_AVOID_NORTHERN
     GLOBAL_ALGO_MAP.clear()
     GLOBAL_AVOID_NORTHERN.clear()
@@ -621,10 +624,6 @@ def subdivide_long_segments(coords, max_step_deg=0.1):
 
 
 def catmull_rom_chain(coords):
-    """
-    ★ 修正：アルファ値を 0.5 (Centripetal) に設定し、大回りのループや不自然な直線を防止。
-    全ルートを一気通貫で処理するため、中継地点の角張りが完全に消滅する。
-    """
     if len(coords) < 3:
         return coords
         
@@ -1034,7 +1033,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # ★ 改善: ルートをブツ切りにせず、全区間を一気通貫のリスト（global_route_coords）として結合する
+        # 軌跡をブツ切りにせず、全区間を一気通貫のリスト（global_route_coords）として結合する
         global_route_coords = []
         curr_p = cleaned_list[0][1]
         global_route_coords.append(curr_p)
@@ -1048,7 +1047,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
-                # 重複を避けて全ルートを後ろに結合していく
                 for pt in interpolated[1:]:
                     if abs(pt[0] - global_route_coords[-1][0]) > 1e-6 or abs(pt[1] - global_route_coords[-1][1]) > 1e-6:
                         global_route_coords.append(pt)
@@ -1071,7 +1069,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
 
         processed_blocks = []
         
-        # 巨大になりすぎた場合の安全装置
         if len(global_route_coords) > 500:
             step = len(global_route_coords) / 500.0
             sub_sampled = [global_route_coords[int(j * step)] for j in range(500)]
@@ -1080,8 +1077,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         else:
             sub_sampled = global_route_coords
             
-        # ★ 改善: 全区間を一気通貫で巨大なスプライン曲線として処理する。
-        # これにより、実測値（中継地点）で接線がリセットされてカクッと曲がる現象が完全に消滅する。
+        # 全区間を一気通貫で巨大なスプライン曲線として処理
+        # 実測値（中継地点）での接線の断絶が消え、完全に滑らかな1本のカーブになる
         smoothed = catmull_rom_chain(sub_sampled)
         
         if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
