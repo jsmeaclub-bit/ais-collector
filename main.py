@@ -73,9 +73,6 @@ def get_spreadsheet_client():
 
 
 def load_algorithm_map(client):
-    """
-    スプレッドシートからエリアごとのアルゴリズム設定と回避フラグ（北方領土・竹島等）を読み込む
-    """
     global GLOBAL_ALGO_MAP, GLOBAL_AVOID_NORTHERN
     GLOBAL_ALGO_MAP.clear()
     GLOBAL_AVOID_NORTHERN.clear()
@@ -108,7 +105,24 @@ def load_algorithm_map(client):
         pass
 
 
+def is_complex_coast(lat, lng):
+    """
+    ★ 新機能: スプレッドシートの設定漏れを防ぐための絶対安全装置。
+    日本沿岸や東南アジア（マラッカ海峡等）の複雑な地形は強制的に主要航路ベースにする。
+    """
+    # 日本周辺 (瀬戸内海・東京湾など)
+    if 30.0 <= lat <= 46.0 and 128.0 <= lng <= 146.0: return True
+    # 東南アジア (マラッカ海峡・シンガポール・インドネシア周辺)
+    if -10.0 <= lat <= 15.0 and 95.0 <= lng <= 120.0: return True
+    # ヨーロッパ (イギリス海峡・北海など)
+    if 48.0 <= lat <= 55.0 and -6.0 <= lng <= 10.0: return True
+    return False
+
+
 def get_route_algorithm(p1, p2):
+    if is_complex_coast(p1[0], p1[1]) or is_complex_coast(p2[0], p2[1]):
+        return "主要航路ベース"
+        
     k1 = (math.floor(p1[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
           math.floor(p1[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
     k2 = (math.floor(p2[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
@@ -456,21 +470,6 @@ def string_pull_path(path, max_lookahead=6):
     return smoothed_path
 
 
-def moving_average_smooth(path, window_size=7):
-    if len(path) < window_size:
-        return path
-    smoothed = [path[0]]
-    for i in range(1, len(path)-1):
-        start = max(0, i - window_size // 2)
-        end = min(len(path), i + window_size // 2 + 1)
-        window = path[start:end]
-        avg_lat = sum(p[0] for p in window) / len(window)
-        avg_lng = sum(p[1] for p in window) / len(window)
-        smoothed.append([avg_lat, avg_lng])
-    smoothed.append(path[-1])
-    return smoothed
-
-
 def get_crowd_sourced_path(p1, p2):
     global GLOBAL_SAFE_GRIDS
     resolution = 0.25
@@ -490,7 +489,7 @@ def get_crowd_sourced_path(p1, p2):
     f_score = {start_gk: heuristic(start_gk)}
     
     iterations = 0
-    while open_set and iterations < 20000:
+    while open_set and iterations < 15000:
         iterations += 1
         current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
         
@@ -503,29 +502,14 @@ def get_crowd_sourced_path(p1, p2):
                     path.append([round(curr_node[0]*resolution, 4), round(curr_node[1]*resolution, 4)])
             path.append(p1)
             path.reverse()
-            
-            if len(path) <= 2:
-                return path
-                
-            smoothed_path = moving_average_smooth(path, window_size=9)
-            
-            sampled = [smoothed_path[0]]
-            step = 6 
-            for k in range(step, len(smoothed_path) - 1, step):
-                sampled.append(smoothed_path[k])
-            sampled.append(smoothed_path[-1])
-            
-            if not route_crosses_land(sampled) and not intersects_northern_territories(sampled):
-                return sampled
-                
-            return string_pull_path(smoothed_path, max_lookahead=6)
+            return path
             
         open_set.remove(current)
         
         for dx, dy in [(0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
             neighbor = (current[0]+dx, current[1]+dy)
             dist = math.hypot(dx, dy)
-            penalty = 1.0 if neighbor in GLOBAL_SAFE_GRIDS else 10.0
+            penalty = 1.0 if neighbor in GLOBAL_SAFE_GRIDS else 8.0
             
             if not (neighbor in GLOBAL_SAFE_GRIDS):
                 if is_point_on_land(neighbor[0]*resolution, neighbor[1]*resolution):
@@ -603,7 +587,7 @@ def remove_d_spikes(pts):
     return cleaned
 
 
-def subdivide_long_segments(coords, max_step_deg=0.1):
+def subdivide_long_segments(coords, max_step_deg=0.5):
     if len(coords) < 2:
         return coords
     subdivided = [coords[0]]
@@ -623,55 +607,39 @@ def subdivide_long_segments(coords, max_step_deg=0.1):
     return subdivided
 
 
-def catmull_rom_chain(coords):
+def smooth_path_chaikin(coords, iterations=3):
+    """
+    ★ 究極の改善：Chaikinの角切りアルゴリズム。
+    スプライン曲線のように陸地へオーバーシュート（暴走）することが絶対にない、
+    地図アプリの業界標準の非常に安全かつ美しいスムージング手法です。
+    """
     if len(coords) < 3:
         return coords
         
+    # 重複ポイントを除去
     pts = [coords[0]]
     for c in coords[1:]:
         if abs(c[0] - pts[-1][0]) > 1e-6 or abs(c[1] - pts[-1][1]) > 1e-6:
             pts.append(c)
+            
     if len(pts) < 3:
         return pts
         
-    p_start = [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]]
-    p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
-    ext_pts = [p_start] + pts + [p_end]
-    
-    alpha = 0.5 
-    result = []
+    # 長い直線を適度に分割し、角が綺麗に丸まるようにする
+    coords = subdivide_long_segments(pts, max_step_deg=0.5)
 
-    def tj(ti, pi, pj):
-        dist = math.hypot(pj[0] - pi[0], pj[1] - pi[1])
-        return ti + max(1e-5, dist ** alpha)
-
-    for i in range(len(ext_pts) - 3):
-        p0, p1, p2, p3 = ext_pts[i], ext_pts[i + 1], ext_pts[i + 2], ext_pts[i + 3]
-        t0 = 0.0
-        t1 = tj(t0, p0, p1)
-        t2 = tj(t1, p1, p2)
-        t3 = tj(t2, p2, p3)
-        seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-        n_steps = max(10, min(30, int(seg_dist / 0.02) + 5))
+    for _ in range(iterations):
+        smoothed = [coords[0]]
+        for i in range(len(coords) - 1):
+            p0 = coords[i]
+            p1 = coords[i + 1]
+            q = [round(0.75 * p0[0] + 0.25 * p1[0], 5), round(0.75 * p0[1] + 0.25 * p1[1], 5)]
+            r = [round(0.25 * p0[0] + 0.75 * p1[0], 5), round(0.25 * p0[1] + 0.75 * p1[1], 5)]
+            smoothed.extend([q, r])
+        smoothed.append(coords[-1])
+        coords = smoothed
         
-        for step in range(n_steps):
-            t = t1 + (t2 - t1) * (step / float(n_steps))
-            a1 = [(t1 - t) / (t1 - t0) * p0[0] + (t - t0) / (t1 - t0) * p1[0],
-                  (t1 - t) / (t1 - t0) * p0[1] + (t - t0) / (t1 - t0) * p1[1]]
-            a2 = [(t2 - t) / (t2 - t1) * p1[0] + (t - t1) / (t2 - t1) * p2[0],
-                  (t2 - t) / (t2 - t1) * p1[1] + (t - t1) / (t2 - t1) * p2[1]]
-            a3 = [(t3 - t) / (t3 - t2) * p2[0] + (t - t2) / (t3 - t2) * p3[0],
-                  (t3 - t) / (t3 - t2) * p2[1] + (t - t2) / (t3 - t2) * p3[1]]
-            b1 = [(t2 - t) / (t2 - t0) * a1[0] + (t - t0) / (t2 - t0) * a2[0],
-                  (t2 - t) / (t2 - t0) * a1[1] + (t - t0) / (t2 - t0) * a2[1]]
-            b2 = [(t3 - t) / (t3 - t1) * a2[0] + (t - t1) / (t3 - t1) * a3[0],
-                  (t3 - t) / (t3 - t1) * a2[1] + (t - t1) / (t3 - t1) * a3[1]]
-            c = [(t2 - t) / (t2 - t1) * b1[0] + (t - t1) / (t2 - t1) * b2[0],
-                 (t2 - t) / (t2 - t1) * b1[1] + (t - t1) / (t2 - t1) * b2[1]]
-            result.append([round(c[0], 5), round(c[1], 5)])
-            
-    result.append([round(pts[-1][0], 5), round(pts[-1][1], 5)])
-    return result
+    return coords
 
 
 def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
@@ -697,14 +665,15 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
             
         crowd_res = get_crowd_sourced_path(p1, p2)
         if crowd_res and not route_crosses_land(crowd_res) and not intersects_northern_territories(crowd_res):
-            res = crowd_res
+            res = string_pull_path(crowd_res, max_lookahead=8)
         else:
             res = query_valid_searoute(p1, p2)
             if res:
-                res = subdivide_long_segments(res, max_step_deg=0.1)
-                res = string_pull_path(res, max_lookahead=15)
+                res = string_pull_path(res, max_lookahead=12)
                 
         if not res:
+            # ★ 改善: ルートが見つからず、かつ直線を引くと陸にぶつかる場合は
+            # 「None」を返し、クモの巣のような直線を引かせない。
             if not direct_crosses and not direct_northern:
                 if straight_dist < 1.5:  
                     return [p1, p2]
@@ -713,7 +682,7 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
     if not is_port_route:
         if res: res = remove_d_spikes(res)
         if not res or len(res) < 2:
-            res = [p1, p2]
+            return None
 
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
         
@@ -1033,26 +1002,31 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        # 軌跡をブツ切りにせず、全区間を一気通貫のリスト（global_route_coords）として結合する
-        global_route_coords = []
-        curr_p = cleaned_list[0][1]
-        global_route_coords.append(curr_p)
+        # ★ 改善: クモの巣化を防ぐため、エラー（None）になったら結合を断ち切り、新たなブロックを作る。
+        ordered_blocks = []
+        curr_block = [cleaned_list[0][1]]
 
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p, prev_s = cleaned_list[i-1]
             curr_t, curr_p, curr_s = cleaned_list[i]
-            
             time_diff_hrs = (curr_t - prev_t).total_seconds() / 3600.0 if prev_t != datetime.min else 0
             
             interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
+                # 成功した場合はブロックに繋げる
                 for pt in interpolated[1:]:
-                    if abs(pt[0] - global_route_coords[-1][0]) > 1e-6 or abs(pt[1] - global_route_coords[-1][1]) > 1e-6:
-                        global_route_coords.append(pt)
+                    if abs(pt[0] - curr_block[-1][0]) > 1e-6 or abs(pt[1] - curr_block[-1][1]) > 1e-6:
+                        curr_block.append(pt)
             else:
-                if abs(curr_p[0] - global_route_coords[-1][0]) > 1e-6 or abs(curr_p[1] - global_route_coords[-1][1]) > 1e-6:
-                    global_route_coords.append(curr_p)
+                # 失敗した場合（陸地横断などでルートが見つからない場合）は、
+                # 強引に直線を引かずに現在のブロックを完了させ、新しいブロックを開始する！
+                if len(curr_block) >= 2:
+                    ordered_blocks.append(curr_block)
+                curr_block = [curr_p]
+
+        if len(curr_block) >= 2:
+            ordered_blocks.append(curr_block)
 
         current_ts_str = existing_latest.get(mmsi, {}).get("timestamp", "")
         current_ts = robust_parse_timestamp(current_ts_str)
@@ -1060,32 +1034,30 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_ts, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
-            for pt in inferred_route["coords"][1:]:
-                if abs(pt[0] - global_route_coords[-1][0]) > 1e-6 or abs(pt[1] - global_route_coords[-1][1]) > 1e-6:
-                    global_route_coords.append(pt)
+            ordered_blocks.append(inferred_route["coords"])
 
-        if len(global_route_coords) < 2:
+        if not ordered_blocks:
             continue
 
         processed_blocks = []
         
-        if len(global_route_coords) > 500:
-            step = len(global_route_coords) / 500.0
-            sub_sampled = [global_route_coords[int(j * step)] for j in range(500)]
-            if sub_sampled[-1] != global_route_coords[-1]:
-                sub_sampled.append(global_route_coords[-1])
-        else:
-            sub_sampled = global_route_coords
+        for raw_coords in ordered_blocks:
+            if len(raw_coords) > 500:
+                step = len(raw_coords) / 500.0
+                sub_sampled = [raw_coords[int(j * step)] for j in range(500)]
+                if sub_sampled[-1] != raw_coords[-1]:
+                    sub_sampled.append(raw_coords[-1])
+            else:
+                sub_sampled = raw_coords
+                
+            # ★ 改善: Catmull-Romの暴走を捨て、安全・確実なChaikinアルゴリズムで滑らかにする
+            smoothed = smooth_path_chaikin(sub_sampled, iterations=3)
             
-        # 全区間を一気通貫で巨大なスプライン曲線として処理
-        # 実測値（中継地点）での接線の断絶が消え、完全に滑らかな1本のカーブになる
-        smoothed = catmull_rom_chain(sub_sampled)
-        
-        if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
-            smoothed = sub_sampled
-            
-        if len(smoothed) >= 2:
-            processed_blocks.append(smoothed)
+            if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
+                smoothed = sub_sampled
+                
+            if len(smoothed) >= 2:
+                processed_blocks.append(smoothed)
 
         if not processed_blocks: 
             calculated_headings[mmsi] = 0.0
