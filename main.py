@@ -487,7 +487,7 @@ def get_crowd_sourced_path(p1, p2):
     f_score = {start_gk: heuristic(start_gk)}
     
     iterations = 0
-    while open_set and iterations < 12000:
+    while open_set and iterations < 20000:
         iterations += 1
         current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
         
@@ -572,34 +572,6 @@ def query_valid_searoute(p1, p2):
     return res
 
 
-def local_shrink_wrap(pts):
-    if len(pts) <= 2:
-        return pts
-        
-    optimized = [pts[0]]
-    i = 0
-    max_lookahead = 8 
-    
-    while i < len(pts) - 1:
-        curr_p = pts[i]
-        shortcut_found = False
-        
-        furthest_idx = min(i + max_lookahead, len(pts) - 1)
-        for j in range(furthest_idx, i, -1):
-            cand_p = pts[j]
-            if not route_crosses_land([curr_p, cand_p]) and not intersects_northern_territories([curr_p, cand_p]):
-                optimized.append(cand_p)
-                i = j
-                shortcut_found = True
-                break
-                
-        if not shortcut_found:
-            i += 1
-            optimized.append(pts[i])
-            
-    return optimized
-
-
 def remove_d_spikes(pts):
     if len(pts) < 3:
         return pts
@@ -628,7 +600,31 @@ def remove_d_spikes(pts):
     return cleaned
 
 
+def subdivide_long_segments(coords, max_step_deg=0.1):
+    if len(coords) < 2:
+        return coords
+    subdivided = [coords[0]]
+    for i in range(1, len(coords)):
+        p1 = subdivided[-1]
+        p2 = coords[i]
+        dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if dist > max_step_deg:
+            n = int(math.ceil(dist / max_step_deg))
+            for k in range(1, n):
+                t = k / float(n)
+                subdivided.append([
+                    round(p1[0] + (p2[0] - p1[0]) * t, 5),
+                    round(p1[1] + (p2[1] - p1[1]) * t, 5)
+                ])
+        subdivided.append(p2)
+    return subdivided
+
+
 def catmull_rom_chain(coords):
+    """
+    ★ 修正：アルファ値を 0.5 (Centripetal) に設定し、大回りのループや不自然な直線を防止。
+    全ルートを一気通貫で処理するため、中継地点の角張りが完全に消滅する。
+    """
     if len(coords) < 3:
         return coords
         
@@ -643,7 +639,7 @@ def catmull_rom_chain(coords):
     p_end = [2 * pts[-1][0] - pts[-2][0], 2 * pts[-1][1] - pts[-2][1]]
     ext_pts = [p_start] + pts + [p_end]
     
-    alpha = 0.2 
+    alpha = 0.5 
     result = []
 
     def tj(ti, pi, pj):
@@ -706,7 +702,8 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
         else:
             res = query_valid_searoute(p1, p2)
             if res:
-                res = string_pull_path(res, max_lookahead=999)
+                res = subdivide_long_segments(res, max_step_deg=0.1)
+                res = string_pull_path(res, max_lookahead=15)
                 
         if not res:
             if not direct_crosses and not direct_northern:
@@ -1037,8 +1034,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
-        ordered_blocks = []
-        curr_sub = [cleaned_list[0][1]]
+        # ★ 改善: ルートをブツ切りにせず、全区間を一気通貫のリスト（global_route_coords）として結合する
+        global_route_coords = []
+        curr_p = cleaned_list[0][1]
+        global_route_coords.append(curr_p)
 
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p, prev_s = cleaned_list[i-1]
@@ -1049,17 +1048,13 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
-                if len(curr_sub) >= 2:
-                    ordered_blocks.append(curr_sub)
-                ordered_blocks.append(interpolated)
-                curr_sub = [curr_p]
+                # 重複を避けて全ルートを後ろに結合していく
+                for pt in interpolated[1:]:
+                    if abs(pt[0] - global_route_coords[-1][0]) > 1e-6 or abs(pt[1] - global_route_coords[-1][1]) > 1e-6:
+                        global_route_coords.append(pt)
             else:
-                if len(curr_sub) >= 2:
-                    ordered_blocks.append(curr_sub)
-                curr_sub = [curr_p]
-
-        if len(curr_sub) >= 2:
-            ordered_blocks.append(curr_sub)
+                if abs(curr_p[0] - global_route_coords[-1][0]) > 1e-6 or abs(curr_p[1] - global_route_coords[-1][1]) > 1e-6:
+                    global_route_coords.append(curr_p)
 
         current_ts_str = existing_latest.get(mmsi, {}).get("timestamp", "")
         current_ts = robust_parse_timestamp(current_ts_str)
@@ -1067,27 +1062,33 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         
         inferred_route = generate_inferred_port_route(data_list, latest_coord, current_ts, current_dest, port_dict)
         if inferred_route and len(inferred_route["coords"]) >= 2:
-            ordered_blocks.append(inferred_route["coords"])
+            for pt in inferred_route["coords"][1:]:
+                if abs(pt[0] - global_route_coords[-1][0]) > 1e-6 or abs(pt[1] - global_route_coords[-1][1]) > 1e-6:
+                    global_route_coords.append(pt)
 
-        if not ordered_blocks:
+        if len(global_route_coords) < 2:
             continue
 
         processed_blocks = []
-        for raw_coords in ordered_blocks:
-            if intersects_northern_territories(raw_coords):
-                safe_macro_route = reroute_via_straits(raw_coords[0], raw_coords[-1])
-                if safe_macro_route:
-                    raw_coords = safe_macro_route
-                else:
-                    continue 
-
-            smoothed = catmull_rom_chain(raw_coords)
+        
+        # 巨大になりすぎた場合の安全装置
+        if len(global_route_coords) > 500:
+            step = len(global_route_coords) / 500.0
+            sub_sampled = [global_route_coords[int(j * step)] for j in range(500)]
+            if sub_sampled[-1] != global_route_coords[-1]:
+                sub_sampled.append(global_route_coords[-1])
+        else:
+            sub_sampled = global_route_coords
             
-            if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
-                smoothed = raw_coords
-                
-            if len(smoothed) >= 2:
-                processed_blocks.append(smoothed)
+        # ★ 改善: 全区間を一気通貫で巨大なスプライン曲線として処理する。
+        # これにより、実測値（中継地点）で接線がリセットされてカクッと曲がる現象が完全に消滅する。
+        smoothed = catmull_rom_chain(sub_sampled)
+        
+        if route_crosses_land(smoothed) or intersects_northern_territories(smoothed):
+            smoothed = sub_sampled
+            
+        if len(smoothed) >= 2:
+            processed_blocks.append(smoothed)
 
         if not processed_blocks: 
             calculated_headings[mmsi] = 0.0
