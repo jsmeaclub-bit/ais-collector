@@ -107,14 +107,13 @@ def load_algorithm_map(client):
 
 def is_complex_coast(lat, lng):
     """
-    特定海域を強制的に「主要航路（searoute）」にする絶対安全装置。
-    南アフリカ沖は経度20度を境界に、東側（インド洋側）のみ主要航路を強制する。
+    複雑な地形のみ強制的に主要航路にする安全装置。
+    ★ 修正: 南アフリカ沖を強制リストから除外し、A*アルゴリズムの使用を許可。
+    これにより、実測値があるのに計算エラーでブツ切りになる現象を防ぎます。
     """
     if 30.0 <= lat <= 46.0 and 128.0 <= lng <= 146.0: return True
     if -10.0 <= lat <= 15.0 and 95.0 <= lng <= 120.0: return True
     if 48.0 <= lat <= 55.0 and -6.0 <= lng <= 10.0: return True
-    # アフリカ東側（インド洋側）を主要航路強制
-    if -40.0 <= lat <= 15.0 and 20.0 <= lng <= 55.0: return True
     return False
 
 
@@ -538,7 +537,7 @@ def get_crowd_sourced_path(p1, p2):
                 
             smoothed_path = moving_average_smooth(path, window_size=9)
             
-            # 視界制限を999（無制限）に解放し、外洋のジグザグを綺麗な直線にアイロンがけする
+            # 外洋のジグザグを綺麗な直線にするため、A*の視界リミッターを「無制限(999)」に解放。
             return string_pull_path(smoothed_path, max_lookahead=999, use_buffer=False)
             
         open_set.remove(current)
@@ -679,24 +678,28 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
     is_main_route = (algo == "主要航路ベース")
     
     direct_crosses = route_crosses_land([p1, p2])
+    # バッファ（陸から11km）を含めた交差判定。これがFalseなら、直線を引いても絶対に安全。
+    direct_crosses_buffered = route_crosses_land([p1, p2], use_buffer=True)
     direct_northern = intersects_northern_territories([p1, p2])
 
     res = None
 
     if is_main_route:
-        if straight_dist < 0.03 and not direct_crosses and not direct_northern:
+        # ★ 改善: 安全な近距離（約100km以内）は強引に直線を引くことで、searouteのエラー落ちによる断続化を防ぐ
+        if straight_dist < 1.0 and not direct_crosses_buffered and not direct_northern:
             return [p1, p2]
         res = query_valid_searoute(p1, p2)
         if res:
             res = subdivide_long_segments(res, max_step_deg=0.1)
-            # 主要航路の引き締め時に「陸地バリア」を有効化し、海岸線張り付きを防ぐ
             res = string_pull_path(res, max_lookahead=15, use_buffer=True)
     else:
-        if straight_dist < 1.5 and not direct_crosses and not direct_northern:
+        # ★ 改善: 安全な近距離（約165km以内）は直線を引く。これによりA*でも不要なエラーを回避。
+        if straight_dist < 1.5 and not direct_crosses_buffered and not direct_northern:
             return [p1, p2]
             
         crowd_res = get_crowd_sourced_path(p1, p2)
-        if crowd_res and not route_crosses_land(crowd_res) and not intersects_northern_territories(crowd_res):
+        # ★ 改善: A*アルゴリズムの結果に対しても、バッファ判定（11km離岸）を厳密に適用する。
+        if crowd_res and not route_crosses_land(crowd_res, use_buffer=True) and not intersects_northern_territories(crowd_res):
             res = crowd_res
         else:
             res = query_valid_searoute(p1, p2)
