@@ -9,6 +9,7 @@ from shapely.geometry import Point, mapping
 from shapely.ops import unary_union
 import gspread
 from google.oauth2.service_account import Credentials
+from collections import defaultdict  # ★ 追加：この1行でエラーが解消されます
 
 AISSTREAM_API_KEY = os.environ.get("AISSTREAM_API_KEY")
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
