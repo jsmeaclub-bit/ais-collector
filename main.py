@@ -92,7 +92,7 @@ def get_config_signature():
     手動設定やロジックバージョンが変更された場合にキャッシュを自動更新するための署名ハッシュ
     """
     sig_obj = {
-        "v": 3,
+        "v": 4,
         "manual": sorted(GLOBAL_MANUAL_ALGO_MAP.items()),
         "avoid": sorted(list(GLOBAL_AVOID_NORTHERN)),
         "buffer": OFFSHORE_BUFFER_DEG
@@ -243,10 +243,13 @@ def sync_and_load_algorithm_map(client, active_points=None):
 def is_narrow_strait_zone(p1, p2):
     for pt in (p1, p2):
         lat, lng = pt[0], pt[1]
+        # ジョホール海峡・シンガポール海峡・バタム/ビンタン周辺
         if 0.8 <= lat <= 2.2 and 103.0 <= lng <= 104.8:
             return True
+        # マラッカ海峡狭部
         if 1.5 <= lat <= 3.5 and 100.5 <= lng <= 103.0:
             return True
+        # 関門海峡・瀬戸内海・東京湾・浦賀水道
         if 33.5 <= lat <= 35.7 and 130.7 <= lng <= 140.1:
             return True
     return False
@@ -381,10 +384,10 @@ def is_point_on_land(lat, lng):
     return False
 
 
-def is_deep_inland(lat, lng, coast_tolerance_deg=0.045):
+def is_deep_inland(lat, lng, max_inland_deg=0.22):
     """
-    港の岸壁（海から約5km以内）ではなく、アルジェリア内陸のような
-    「完全な内陸（GPS異常測位）」であるかを判定する。
+    サハリン（アニワ湾奥など）や河口港の正規データを誤って消さないよう、
+    海岸線から約25km（0.22度）以上離れた完全な内陸（アルジェリア砂漠等のGPS異常値）のみを検出する。
     """
     if not HAS_LAND_MASK:
         return False
@@ -397,14 +400,14 @@ def is_deep_inland(lat, lng, coast_tolerance_deg=0.045):
         _DEEP_INLAND_CACHE[key] = False
         return False
 
-    # 周囲約5km（8方向）に1つでも海があれば港湾・沿岸とみなす
-    d = coast_tolerance_deg * 0.7071
-    for dy, dx in [(coast_tolerance_deg, 0), (-coast_tolerance_deg, 0),
-                   (0, coast_tolerance_deg), (0, -coast_tolerance_deg),
-                   (d, d), (d, -d), (-d, d), (-d, -d)]:
-        if not is_point_on_land(lat + dy, lng + dx):
-            _DEEP_INLAND_CACHE[key] = False
-            return False
+    # 約12kmおよび約25kmの周囲16点に1つでも海があれば湾奥・港湾とみなす
+    for rad in (max_inland_deg * 0.5, max_inland_deg):
+        d = rad * 0.7071
+        for dy, dx in [(rad, 0), (-rad, 0), (0, rad), (0, -rad),
+                       (d, d), (d, -d), (-d, d), (-d, -d)]:
+            if not is_point_on_land(lat + dy, lng + dx):
+                _DEEP_INLAND_CACHE[key] = False
+                return False
 
     _DEEP_INLAND_CACHE[key] = True
     return True
@@ -548,7 +551,6 @@ async def process_message_queue(queue, target_mmsis, received):
                     pos = data.get("Message", {}).get("PositionReport", {})
                     lat_v = pos.get("Latitude")
                     lng_v = pos.get("Longitude")
-                    # 内陸のGPSスプーフィング異常値は受信時点で破棄
                     if lat_v is not None and lng_v is not None and not is_deep_inland(lat_v, lng_v):
                         received[mmsi]["lat"] = lat_v
                         received[mmsi]["lng"] = lng_v
@@ -636,14 +638,14 @@ def route_crosses_land(coords, use_buffer=True):
         dist = math.hypot(b[0] - a[0], b[1] - a[1])
         if dist == 0: continue
         
-        steps = max(2, int(math.ceil(dist / 0.008)))
+        steps = max(2, int(math.ceil(dist / 0.006)))
         for s in range(1, steps):
             t = s / float(steps)
             lat = a[0] + (b[0] - a[0]) * t
             lng = a[1] + (b[1] - a[1]) * t
             
-            if math.hypot(lat - p_start[0], lng - p_start[1]) >= 0.015 and \
-               math.hypot(lat - p_end[0], lng - p_end[1]) >= 0.015:
+            if math.hypot(lat - p_start[0], lng - p_start[1]) >= 0.012 and \
+               math.hypot(lat - p_end[0], lng - p_end[1]) >= 0.012:
                 if is_point_on_land(lat, lng):
                     return True
 
@@ -685,7 +687,7 @@ def intersects_northern_territories(coords):
 def get_offshore_candidates(pt):
     candidates = []
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
-    for radius in (0.03, 0.08, 0.15, 0.25):
+    for radius in (0.02, 0.06, 0.12, 0.25):
         for dy, dx in dirs:
             n_lat, n_lng = round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)
             if not is_point_on_land(n_lat, n_lng):
@@ -694,9 +696,6 @@ def get_offshore_candidates(pt):
 
 
 def get_port_approach_point(port_pos):
-    """
-    内陸座標であればNoneを返し、海岸付近であれば最寄りの海上座標を返す。
-    """
     if is_deep_inland(port_pos[0], port_pos[1]):
         return None
     if not is_point_on_land(port_pos[0], port_pos[1]):
@@ -783,6 +782,77 @@ def moving_average_smooth(path, window_size=7):
         smoothed.append([avg_lat, avg_lng])
     smoothed.append(path[-1])
     return smoothed
+
+
+def get_local_strait_path(p1, p2):
+    """
+    ジョホール海峡（シンガポール島とマレー半島の間の狭い水路）など、
+    searouteネットワークが存在しない狭水道を約800m刻み（0.008度）の高精細グリッドで繋ぐ専用探索。
+    """
+    if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) > 1.5:
+        return None
+    resolution = 0.008  # 約880m刻み
+    start_gk = (int(round(p1[0] / resolution)), int(round(p1[1] / resolution)))
+    end_gk = (int(round(p2[0] / resolution)), int(round(p2[1] / resolution)))
+
+    if math.hypot(start_gk[0] - end_gk[0], start_gk[1] - end_gk[1]) <= 1.5:
+        return [p1, p2]
+
+    def heuristic(node):
+        return math.hypot(node[0] - end_gk[0], node[1] - end_gk[1]) * 1.05
+
+    open_heap = [(heuristic(start_gk), 0.0, start_gk)]
+    came_from = {}
+    g_score = {start_gk: 0.0}
+    closed_set = set()
+
+    iterations = 0
+    while open_heap and iterations < 12000:
+        iterations += 1
+        _, curr_g, current = heapq.heappop(open_heap)
+
+        if current in closed_set:
+            continue
+        closed_set.add(current)
+
+        if current == end_gk:
+            path = [p2]
+            curr_node = current
+            while curr_node in came_from:
+                curr_node = came_from[curr_node]
+                if curr_node != start_gk:
+                    path.append([round(curr_node[0] * resolution, 5), round(curr_node[1] * resolution, 5)])
+            path.append(p1)
+            path.reverse()
+
+            smoothed_path = moving_average_smooth(path, window_size=5)
+            return string_pull_path(smoothed_path, max_lookahead=30, use_buffer=False)
+
+        for dx, dy in ((0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)):
+            neighbor = (current[0] + dx, current[1] + dy)
+            if neighbor in closed_set:
+                continue
+            dist = 1.4142 if (dx != 0 and dy != 0) else 1.0
+            n_lat = neighbor[0] * resolution
+            n_lng = neighbor[1] * resolution
+
+            if neighbor != end_gk and is_point_on_land(n_lat, n_lng):
+                continue  # 狭水道では陸上マスは完全に進入不可
+
+            # 岸壁スレスレ（約400m以内）を避けて水路の中央を通す軽微なペナルティ
+            shore_penalty = 1.0
+            if neighbor != end_gk:
+                if is_point_on_land(n_lat + 0.004, n_lng) or is_point_on_land(n_lat - 0.004, n_lng) or \
+                   is_point_on_land(n_lat, n_lng + 0.004) or is_point_on_land(n_lat, n_lng - 0.004):
+                    shore_penalty = 1.8
+
+            tentative_g = curr_g + (dist * shore_penalty)
+            if tentative_g < g_score.get(neighbor, float('inf')):
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative_g
+                heapq.heappush(open_heap, (tentative_g + heuristic(neighbor), tentative_g, neighbor))
+
+    return None
 
 
 def get_crowd_sourced_path(p1, p2, strict_buffer=True):
@@ -988,7 +1058,7 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
     if not coords or len(coords) < 2:
         return -999999.0
 
-    # 1. 絶対失格条件（素の陸地横断・内陸座標侵入・北方領土/竹島侵入）
+    # 1. 絶対失格条件（素の陸地横断・内陸異常座標侵入・北方領土/竹島侵入）
     if route_crosses_land(coords, use_buffer=False):
         return -999999.0
     if any(is_deep_inland(c[0], c[1]) for c in coords):
@@ -1063,7 +1133,6 @@ def finalize_endpoints(res, p1, p2):
 
 
 def _compute_base_geometry(p1, p2, is_port_route=False):
-    # いずれかの端点が完全な内陸（GPS異常値）にある場合はルート生成を拒否
     if is_deep_inland(p1[0], p1[1]) or is_deep_inland(p2[0], p2[1]):
         return None
 
@@ -1078,6 +1147,9 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             sr_res = query_valid_searoute(p1, p2)
             if sr_res and not route_crosses_land(sr_res, use_buffer=False):
                 return string_pull_path(subdivide_long_segments(sr_res, 0.10), max_lookahead=8, use_buffer=False)
+            local_res = get_local_strait_path(p1, p2)
+            if local_res and not route_crosses_land(local_res, use_buffer=False):
+                return local_res
         if straight_dist <= 12.0:
             cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=False)
             if cs_res and not route_crosses_land(cs_res, use_buffer=False) and not intersects_northern_territories(cs_res):
@@ -1091,6 +1163,7 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
     direct_crosses_raw = route_crosses_land([p1, p2], use_buffer=False)
     direct_northern    = intersects_northern_territories([p1, p2])
 
+    # 1. ジョホール海峡・シンガポール周辺・東京湾などの手動固定＆狭水道エリア
     if manual_algo == "主要航路ベース" or is_strait:
         if straight_dist < 0.15 and not direct_crosses_raw and not direct_northern:
             return [p1, p2]
@@ -1099,6 +1172,10 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             sr_pulled = string_pull_path(subdivide_long_segments(sr_res, 0.08), max_lookahead=10, use_buffer=False)
             if score_candidate_route(sr_pulled, p1, p2, True, 0.5, is_strait_or_manual=True) > -500000:
                 return sr_pulled
+        # searouteにデータがないジョホール海峡等の狭水路は800m刻みのローカル水路探索で繋ぐ
+        local_strait = get_local_strait_path(p1, p2)
+        if local_strait and score_candidate_route(local_strait, p1, p2, True, 0.5, is_strait_or_manual=True) > -500000:
+            return local_strait
         if not direct_crosses_raw and not direct_northern and straight_dist < 0.8:
             return [p1, p2]
         if straight_dist <= 12.0:
@@ -1333,7 +1410,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                             lng_val = float(r_lng)
                             if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0):
                                 continue
-                            # 完全な内陸座標（GPS異常値）を履歴読み込み時に除外
                             if is_deep_inland(lat_val, lng_val):
                                 continue
                             ts = robust_parse_timestamp(r_ts)
