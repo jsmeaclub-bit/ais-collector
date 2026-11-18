@@ -2,7 +2,7 @@ name: ais_collector
 
 on:
   schedule:
-    - cron: '12,42 * * * *'
+    - cron: '12 * * * *'
   workflow_dispatch:
 
 jobs:
