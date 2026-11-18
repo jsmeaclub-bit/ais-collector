@@ -2,6 +2,7 @@ import os
 import json
 import time
 import math
+import statistics
 import asyncio
 import subprocess
 import sys
@@ -52,11 +53,14 @@ EXPIRATION_SECONDS = 180 * 24 * 3600
 
 MAX_GENERAL_SPEED_KNOTS = 26.0
 MIN_TIME_HRS_FOR_SPEED  = 1.0  
-SPIKE_COS_THETA         = -0.3
-SPIKE_LEG_MIN_DEG       = 0.2
+SPIKE_COS_THETA         = -0.25
+SPIKE_LEG_MIN_DEG       = 0.15
 
 TSUGARU_STRAIT = [41.45, 140.55]
 SOYA_STRAIT    = [45.65, 141.95]
+
+OFFSHORE_BUFFER_DEG  = 0.12  # 約13kmの厳格な離岸バリア
+PORT_AREA_RADIUS_DEG = 0.45  # 仕向地エリア半径（約50km圏内なら無理な往復補完をしない）
 
 GLOBAL_SAFE_GRIDS = set()
 GLOBAL_ALGO_MAP = {}
@@ -175,7 +179,8 @@ def sync_and_load_algorithm_map(client, active_points=None):
 
 def get_route_algorithm(p1, p2):
     """
-    Algorithm_Map シートの設定のみに従ってアルゴリズムを決定する。
+    Algorithm_Map シートの設定に従い、東京湾等の複雑海域は主要航路ベース、
+    外洋・実測充実海域は測定点ベースを返す。
     """
     k1 = (math.floor(p1[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
           math.floor(p1[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
@@ -272,13 +277,74 @@ def get_port_dictionary(client):
                         port_dict[ais_name] = {
                             "name": str(name) if name else ais_name,
                             "lat": float(lat),
-                            "lng": float(lng)
+                            "lng": float(lng),
+                            "source": "manual"
                         }
                     except ValueError:
                         pass
     except Exception:
         pass
     return port_dict, existing_ais_names
+
+
+def infer_port_areas_from_fleet(tracks_map, base_port_dict):
+    """
+    他船の仕向地変更実績および停泊（低速滞在）実績から、
+    各仕向地コードの想定寄港エリア（中心座標）を自動学習し、辞書を補完する。
+    """
+    effective_dict = dict(base_port_dict)
+    dest_lats = defaultdict(list)
+    dest_lngs = defaultdict(list)
+
+    for mmsi, data_list in tracks_map.items():
+        if not data_list:
+            continue
+        sorted_items = sorted(data_list, key=lambda x: (x[0], x[2]))
+        prev_dest = ""
+        prev_pt = None
+
+        for ts, pt, idx, r_dest, r_spd in sorted_items:
+            d_clean = str(r_dest).strip().upper()
+            if d_clean in ("-", "NONE", ""):
+                d_clean = prev_dest
+
+            if d_clean and d_clean not in ("-", "NONE", ""):
+                # 1. 低速停泊（荷役・錨泊実績）は寄港エリアの強い根拠
+                if r_spd is not None and r_spd <= 1.5:
+                    dest_lats[d_clean].extend([pt[0], pt[0]])
+                    dest_lngs[d_clean].extend([pt[1], pt[1]])
+
+                # 2. 他船が仕向地を変更した瞬間の前後地点を記録
+                if prev_dest and d_clean != prev_dest:
+                    if prev_pt is not None:
+                        dest_lats[prev_dest].append(prev_pt[0])
+                        dest_lngs[prev_dest].append(prev_pt[1])
+                    dest_lats[prev_dest].append(pt[0])
+                    dest_lngs[prev_dest].append(pt[1])
+
+            if d_clean:
+                prev_dest = d_clean
+            prev_pt = pt
+
+    inferred_count = 0
+    for dest_code, lats in dest_lats.items():
+        if dest_code in effective_dict:
+            continue
+        if len(lats) >= 3:
+            med_lat = round(statistics.median(lats), 4)
+            med_lng = round(statistics.median(dest_lngs[dest_code]), 4)
+            effective_dict[dest_code] = {
+                "name": f"{dest_code}(他船実績推定)",
+                "lat": med_lat,
+                "lng": med_lng,
+                "source": "inferred"
+            }
+            inferred_count += 1
+
+    if inferred_count > 0:
+        print(f"[INFO] 他船の仕向地変更・停泊実績から {inferred_count} 件の想定寄港エリアを補完しました。")
+
+    return effective_dict
 
 
 def robust_parse_timestamp(ts_str):
@@ -420,25 +486,29 @@ def is_point_on_land(lat, lng):
     return False
 
 
-def is_point_on_land_with_buffer(lat, lng, buffer_deg=0.12):
+def is_point_on_land_with_buffer(lat, lng, buffer_deg=OFFSHORE_BUFFER_DEG):
     """
-    陸地への接近・岬の陸切りを防ぐ安全バリア（約13kmの8方向バッファ）
+    約13km（0.12度）の厳格な離岸バリア（8方向＋中間半径チェック）
     """
-    if is_point_on_land(lat, lng): return True
-    d = buffer_deg * 0.7071
-    for dy, dx in [(buffer_deg, 0), (-buffer_deg, 0), (0, buffer_deg), (0, -buffer_deg),
-                   (d, d), (d, -d), (-d, d), (-d, -d)]:
-        if is_point_on_land(lat + dy, lng + dx):
-            return True
+    if is_point_on_land(lat, lng):
+        return True
+    for r in (buffer_deg * 0.5, buffer_deg):
+        d = r * 0.7071
+        for dy, dx in [(r, 0), (-r, 0), (0, r), (0, -r),
+                       (d, d), (d, -d), (-d, d), (-d, -d)]:
+            if is_point_on_land(lat + dy, lng + dx):
+                return True
     return False
 
 
-def route_crosses_land(coords, use_buffer=False):
+def route_crosses_land(coords, use_buffer=True):
     if not HAS_LAND_MASK or len(coords) < 2:
         return False
 
     p_start = coords[0]
     p_end = coords[-1]
+    start_in_buffer = is_point_on_land_with_buffer(p_start[0], p_start[1])
+    end_in_buffer = is_point_on_land_with_buffer(p_end[0], p_end[1])
 
     for i in range(len(coords) - 1):
         a = coords[i]
@@ -452,14 +522,18 @@ def route_crosses_land(coords, use_buffer=False):
             lat = a[0] + (b[0] - a[0]) * t
             lng = a[1] + (b[1] - a[1]) * t
             
-            if math.hypot(lat - p_start[0], lng - p_start[1]) < 0.01: continue
-            if math.hypot(lat - p_end[0], lng - p_end[1]) < 0.01: continue
-            
-            if use_buffer:
-                if is_point_on_land_with_buffer(lat, lng, buffer_deg=0.12):
-                    return True
-            else:
+            # 常に素の陸地横断（陸切り）は絶対禁止
+            if math.hypot(lat - p_start[0], lng - p_start[1]) >= 0.01 and \
+               math.hypot(lat - p_end[0], lng - p_end[1]) >= 0.01:
                 if is_point_on_land(lat, lng):
+                    return True
+
+            if use_buffer:
+                if start_in_buffer and math.hypot(lat - p_start[0], lng - p_start[1]) < OFFSHORE_BUFFER_DEG * 1.1:
+                    continue
+                if end_in_buffer and math.hypot(lat - p_end[0], lng - p_end[1]) < OFFSHORE_BUFFER_DEG * 1.1:
+                    continue
+                if is_point_on_land_with_buffer(lat, lng):
                     return True
                 
     return False
@@ -492,12 +566,24 @@ def intersects_northern_territories(coords):
 def get_offshore_candidates(pt):
     candidates = []
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
-    for radius in (0.05, 0.1, 0.2):
+    for radius in (0.05, 0.15, 0.25):
         for dy, dx in dirs:
             n_lat, n_lng = round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)
             if not is_point_on_land(n_lat, n_lng):
                 candidates.append([n_lat, n_lng])
     return candidates
+
+
+def get_port_approach_point(port_pos):
+    """
+    港の代表座標が陸上にある場合、最寄りの安全な海上アプローチ座標を返す。
+    """
+    if not is_point_on_land(port_pos[0], port_pos[1]):
+        return port_pos
+    cands = get_offshore_candidates(port_pos)
+    if cands:
+        return cands[0]
+    return port_pos
 
 
 def get_searoute_path(p1, p2):
@@ -526,7 +612,11 @@ def get_searoute_path(p1, p2):
     return None
 
 
-def string_pull_path(path, max_lookahead=6, use_buffer=False):
+def string_pull_path(path, max_lookahead=999, use_buffer=True):
+    """
+    13km離岸バリアと陸切り防止を厳守しつつ、不必要な折れ曲がりを削ぎ落として
+    実測点同士を円滑な最短変針点で結ぶ。
+    """
     if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
@@ -561,7 +651,7 @@ def moving_average_smooth(path, window_size=7):
 
 def get_crowd_sourced_path(p1, p2):
     global GLOBAL_SAFE_GRIDS
-    resolution = 0.25
+    resolution = 0.20
     start_gk = (int(round(p1[0] / resolution)), int(round(p1[1] / resolution)))
     end_gk = (int(round(p2[0] / resolution)), int(round(p2[1] / resolution)))
     
@@ -578,7 +668,7 @@ def get_crowd_sourced_path(p1, p2):
     f_score = {start_gk: heuristic(start_gk)}
     
     iterations = 0
-    while open_set and iterations < 20000:
+    while open_set and iterations < 30000:
         iterations += 1
         current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
         
@@ -595,7 +685,7 @@ def get_crowd_sourced_path(p1, p2):
             if len(path) <= 2:
                 return path
                 
-            smoothed_path = moving_average_smooth(path, window_size=9)
+            smoothed_path = moving_average_smooth(path, window_size=7)
             return string_pull_path(smoothed_path, max_lookahead=999, use_buffer=True)
             
         open_set.remove(current)
@@ -603,11 +693,17 @@ def get_crowd_sourced_path(p1, p2):
         for dx, dy in [(0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
             neighbor = (current[0]+dx, current[1]+dy)
             dist = math.hypot(dx, dy)
-            penalty = 1.0 if neighbor in GLOBAL_SAFE_GRIDS else 8.0
+            n_lat = neighbor[0] * resolution
+            n_lng = neighbor[1] * resolution
             
-            if not (neighbor in GLOBAL_SAFE_GRIDS):
-                if is_point_on_land_with_buffer(neighbor[0]*resolution, neighbor[1]*resolution, buffer_deg=0.12):
-                    penalty = 200.0
+            # 13km離岸バリア内のマス目は、緑エリアであっても進入を強くブロック
+            if neighbor != end_gk and is_point_on_land_with_buffer(n_lat, n_lng):
+                penalty = 500.0
+            elif neighbor in GLOBAL_SAFE_GRIDS:
+                penalty = 1.0
+            else:
+                # 他船の実測点を参考にしつつ、孤立点に引っ張られてスパイクが出ないようコスト差を1.2に抑制
+                penalty = 1.20
                     
             tentative_g = g_score[current] + (dist * penalty)
             
@@ -653,8 +749,12 @@ def query_valid_searoute(p1, p2):
     return res
 
 
-def remove_d_spikes(pts):
-    if len(pts) < 3:
+def remove_d_spikes(pts, is_port_visit=False):
+    """
+    鋭角なスパイク（飛び出し）を除去する。
+    ただし、仕向地変更による正規の寄港折り返し点（is_port_visit=True）は保護する。
+    """
+    if len(pts) < 3 or is_port_visit:
         return pts
     
     cleaned = [pts[0]]
@@ -681,7 +781,7 @@ def remove_d_spikes(pts):
     return cleaned
 
 
-def subdivide_long_segments(coords, max_step_deg=0.5):
+def subdivide_long_segments(coords, max_step_deg=1.5):
     if len(coords) < 2:
         return coords
     subdivided = [coords[0]]
@@ -701,7 +801,10 @@ def subdivide_long_segments(coords, max_step_deg=0.5):
     return subdivided
 
 
-def smooth_path_chaikin(coords, iterations=3):
+def smooth_path_chaikin(coords, iterations=4):
+    """
+    変針点の前後に大らかなアールの曲線を描き、スパイクのない滑らかな軌跡を生成する。
+    """
     if len(coords) < 3:
         return coords
         
@@ -713,7 +816,7 @@ def smooth_path_chaikin(coords, iterations=3):
     if len(pts) < 3:
         return pts
         
-    coords = subdivide_long_segments(pts, max_step_deg=0.5)
+    coords = subdivide_long_segments(pts, max_step_deg=1.5)
 
     for _ in range(iterations):
         smoothed = [coords[0]]
@@ -735,49 +838,54 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
     algo = get_route_algorithm(p1, p2)
     is_main_route = (algo == "主要航路ベース")
     
-    direct_crosses_buffered = route_crosses_land([p1, p2], use_buffer=True)
+    # 寄港ルート（港への進入・離脱）では13km離岸バリアを緩和し、素の陸地横断のみ禁止
+    use_buf = not is_port_route
+    direct_crosses = route_crosses_land([p1, p2], use_buffer=use_buf)
     direct_northern = intersects_northern_territories([p1, p2])
 
     res = None
 
     if is_main_route:
-        if straight_dist < 1.0 and not direct_crosses_buffered and not direct_northern:
+        # 東京湾など複雑海域では主要航路への接続を優先（極近距離のみ直線許容）
+        if straight_dist < 0.25 and not direct_crosses and not direct_northern:
             return [p1, p2]
         res = query_valid_searoute(p1, p2)
         if res:
-            res = subdivide_long_segments(res, max_step_deg=0.1)
-            res = string_pull_path(res, max_lookahead=999, use_buffer=True)
+            res = subdivide_long_segments(res, max_step_deg=0.15)
+            res = string_pull_path(res, max_lookahead=12 if not is_port_route else 6, use_buffer=use_buf)
     else:
-        if straight_dist < 1.5 and not direct_crosses_buffered and not direct_northern:
+        # 南アフリカ沖西などの外洋ではスパイクが出ないよう実測点を円滑に結ぶことを優先
+        if straight_dist < 2.5 and not direct_crosses and not direct_northern:
             return [p1, p2]
             
         crowd_res = get_crowd_sourced_path(p1, p2)
-        if crowd_res and not route_crosses_land(crowd_res, use_buffer=True) and not intersects_northern_territories(crowd_res):
+        if crowd_res and not route_crosses_land(crowd_res, use_buffer=use_buf) and not intersects_northern_territories(crowd_res):
             res = crowd_res
         else:
             res = query_valid_searoute(p1, p2)
             if res:
-                res = subdivide_long_segments(res, max_step_deg=0.1)
-                res = string_pull_path(res, max_lookahead=999, use_buffer=True)
+                res = subdivide_long_segments(res, max_step_deg=0.15)
+                res = string_pull_path(res, max_lookahead=999, use_buffer=use_buf)
                 
         if not res:
-            if not direct_crosses_buffered and not direct_northern:
-                if straight_dist < 1.5:  
+            if not direct_crosses and not direct_northern:
+                if straight_dist < 2.5:  
                     return [p1, p2]
             return None 
 
     if not is_port_route:
-        if res: res = remove_d_spikes(res)
+        if res:
+            res = remove_d_spikes(res, is_port_visit=False)
         if not res or len(res) < 2:
             return None
 
         route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
         
-        detour_limit = 4.0 if is_main_route else 2.0
-        excess_limit = 1.0 if is_main_route else 0.4
+        detour_limit = 4.0 if is_main_route else 2.5
+        excess_limit = 1.0 if is_main_route else 0.6
         
         if route_dist > (straight_dist * detour_limit) and (route_dist - straight_dist) > excess_limit:
-            if straight_dist < 1.5 and not direct_crosses_buffered and not direct_northern:
+            if straight_dist < 2.5 and not direct_crosses and not direct_northern:
                 res = [p1, p2]
             else:
                 return None
@@ -799,10 +907,11 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
     return res
 
 
-def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_hrs, port_dict):
+def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_hrs, effective_port_dict):
     """
-    2点間でAISの仕向地（Destination）が変更された際、旧仕向地の港（Port_Dictionary登録済）を
-    経由して折り返す寄港ルートを生成する（日本・海外問わず全港湾対応）。
+    途中で仕向地が変更になっている場合、その地点（旧仕向地）に寄港した軌跡を描く。
+    ただし、仕向地は一定のエリア（PORT_AREA_RADIUS_DEG ≒ 約50km）であり、
+    前後の実測点がすでにそのエリア付近にあれば無理に往復軌跡を描かない。
     """
     p_dest = str(prev_dest).strip().upper()
     c_dest = str(curr_dest).strip().upper()
@@ -814,20 +923,21 @@ def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_h
     if p_dest == c_dest:
         return None
         
-    port_info = port_dict.get(p_dest)
+    port_info = effective_port_dict.get(p_dest)
     if not port_info:
         return None
         
-    port_pos = [port_info["lat"], port_info["lng"]]
+    raw_port_pos = [port_info["lat"], port_info["lng"]]
     
-    # すでに港のすぐ近く（約30km以内）の実測点が存在する場合は補完不要
-    if math.hypot(prev_p[0] - port_pos[0], prev_p[1] - port_pos[1]) < 0.3 or \
-       math.hypot(curr_p[0] - port_pos[0], curr_p[1] - port_pos[1]) < 0.3:
+    # 仕向地エリア（一定範囲）の付近にすでに実測点が存在する場合は無理に往復軌跡を表示しない
+    if math.hypot(prev_p[0] - raw_port_pos[0], prev_p[1] - raw_port_pos[1]) <= PORT_AREA_RADIUS_DEG or \
+       math.hypot(curr_p[0] - raw_port_pos[0], curr_p[1] - raw_port_pos[1]) <= PORT_AREA_RADIUS_DEG:
         return None
         
-    # 寄港するほどの距離的余裕があるか、かつ速度が現実的か判定（最大24ノットまで許容）
-    dist_deg = math.hypot(prev_p[0] - port_pos[0], prev_p[1] - port_pos[1]) + \
-               math.hypot(curr_p[0] - port_pos[0], curr_p[1] - port_pos[1])
+    port_approach = get_port_approach_point(raw_port_pos)
+    
+    dist_deg = math.hypot(prev_p[0] - port_approach[0], prev_p[1] - port_approach[1]) + \
+               math.hypot(curr_p[0] - port_approach[0], curr_p[1] - port_approach[1])
     if dist_deg > 25.0:
         return None
         
@@ -836,10 +946,10 @@ def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_h
         if req_speed > 24.0:
             return None
             
-    c1_list = interpolate_sea_route_linear(prev_p, port_pos, is_port_route=True)
+    c1_list = interpolate_sea_route_linear(prev_p, port_approach, is_port_route=True)
     if not c1_list:
         return None
-    c2_list = interpolate_sea_route_linear(port_pos, curr_p, is_port_route=True)
+    c2_list = interpolate_sea_route_linear(port_approach, curr_p, is_port_route=True)
     if not c2_list:
         return None
         
@@ -959,9 +1069,12 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             except Exception:
                 pass
 
+    # 他船の仕向地変更・停泊実績を統合した仕向地エリア辞書を構築
+    effective_port_dict = infer_port_areas_from_fleet(tracks_map, port_dict)
+
     global GLOBAL_SAFE_GRIDS
     GLOBAL_SAFE_GRIDS.clear()
-    CROWD_RESOLUTION = 0.25
+    CROWD_RESOLUTION = 0.20
     
     if os.path.exists(COVERAGE_POINTS_FILE):
         try:
@@ -990,7 +1103,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             continue
         data_list.sort(key=lambda x: (x[0], x[2]))
         
-        # 仕向地（r_dest）も保持して時系列リストを構築
         cleaned_list = []
         for item in data_list:
             ts, pt, idx, r_dest, r_spd = item
@@ -1076,19 +1188,21 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             
         category = master_map.get(mmsi, {}).get("category", "外国籍船")
 
+        # ブロック単位で (coords_list, has_port_visit) を保持
         ordered_blocks = []
         curr_block = [cleaned_list[0][1]]
+        curr_has_port = False
 
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p, prev_s, prev_d = cleaned_list[i-1]
             curr_t, curr_p, curr_s, curr_d = cleaned_list[i]
             time_diff_hrs = (curr_t - prev_t).total_seconds() / 3600.0 if prev_t != datetime.min else 0
             
-            # 1. まずこの2点間で仕向地変更（寄港折り返し）が起きているかチェックし、該当すれば港経由ルートに差し替える
-            interpolated = try_infer_segment_via_port(prev_p, curr_p, prev_d, curr_d, time_diff_hrs, port_dict)
-            
-            # 2. 寄港変更がなければ通常の海上ルート補完を行う
-            if not interpolated:
+            port_interpolated = try_infer_segment_via_port(prev_p, curr_p, prev_d, curr_d, time_diff_hrs, effective_port_dict)
+            if port_interpolated:
+                interpolated = port_interpolated
+                curr_has_port = True
+            else:
                 interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
             
             if interpolated and len(interpolated) >= 2:
@@ -1097,18 +1211,19 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         curr_block.append(pt)
             else:
                 if len(curr_block) >= 2:
-                    ordered_blocks.append(curr_block)
+                    ordered_blocks.append((curr_block, curr_has_port))
                 curr_block = [curr_p]
+                curr_has_port = False
 
         if len(curr_block) >= 2:
-            ordered_blocks.append(curr_block)
+            ordered_blocks.append((curr_block, curr_has_port))
 
         if not ordered_blocks:
             continue
 
         processed_blocks = []
         
-        for raw_coords in ordered_blocks:
+        for raw_coords, has_port in ordered_blocks:
             if len(raw_coords) > 500:
                 step = len(raw_coords) / 500.0
                 sub_sampled = [raw_coords[int(j * step)] for j in range(500)]
@@ -1117,10 +1232,13 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             else:
                 sub_sampled = raw_coords
                 
-            smoothed = smooth_path_chaikin(sub_sampled, iterations=3)
+            # ブロック結合部で生じたスパイクも除去（正規の寄港折り返しは保護）
+            de_spiked = remove_d_spikes(sub_sampled, is_port_visit=has_port)
+            smoothed = smooth_path_chaikin(de_spiked, iterations=4)
             
-            if route_crosses_land(smoothed, use_buffer=True) or intersects_northern_territories(smoothed):
-                smoothed = sub_sampled
+            # 素の陸地交差（陸切り）または北方領土・竹島侵入が起きた場合のみ安全側へフォールバック
+            if route_crosses_land(smoothed, use_buffer=False) or intersects_northern_territories(smoothed):
+                smoothed = de_spiked
                 
             if len(smoothed) >= 2:
                 processed_blocks.append(smoothed)
@@ -1184,7 +1302,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     for mmsi, ship_data in existing_latest.items():
         ship_data["heading"] = calculated_headings.get(mmsi, 0.0)
         dest_val = ship_data.get("destination", "-")
-        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
+        ship_data["dest_name"] = effective_port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
