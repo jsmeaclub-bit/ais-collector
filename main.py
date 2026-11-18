@@ -2,6 +2,8 @@ import os
 import json
 import time
 import math
+import heapq
+import hashlib
 import statistics
 import asyncio
 import subprocess
@@ -16,12 +18,12 @@ from google.oauth2.service_account import Credentials
 
 try:
     import searoute as sr
-    from shapely.geometry import Point, mapping, LineString
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "searoute", "shapely"])
     import searoute as sr
-    from shapely.geometry import Point, mapping, LineString
+    from shapely.geometry import Point, mapping
     from shapely.ops import unary_union
 
 try:
@@ -47,6 +49,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 CURRENT_YEAR = datetime.now(timezone.utc).year
 LATEST_FILE = os.path.join(DATA_DIR, f"latest_{CURRENT_YEAR}.json")
 ROUTES_FILE = os.path.join(DATA_DIR, f"routes_{CURRENT_YEAR}.json")
+ROUTE_CACHE_FILE = os.path.join(DATA_DIR, "route_cache.json.gz")
 COVERAGE_POINTS_FILE = os.path.join(DATA_DIR, "coverage_points.json")
 COVERAGE_FILE = os.path.join(DATA_DIR, "coverage.json")
 EXPIRATION_SECONDS = 180 * 24 * 3600  
@@ -68,6 +71,12 @@ GLOBAL_AUTO_ALGO_MAP = {}
 GLOBAL_AVOID_NORTHERN = set()
 MACRO_RESOLUTION = 2.0
 
+# 高速化用メモリキャッシュ
+_LAND_CACHE = {}
+_BUFFER_CACHE = {}
+_PERSISTENT_ROUTE_CACHE = {}
+_ROUTE_CACHE_DIRTY = False
+
 
 def get_spreadsheet_client():
     if not GCP_SA_KEY:
@@ -75,6 +84,59 @@ def get_spreadsheet_client():
     sa_info = json.loads(GCP_SA_KEY)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     return gspread.authorize(Credentials.from_service_account_info(sa_info, scopes=scopes))
+
+
+def get_config_signature():
+    """
+    手動設定や回避エリアが変更された場合にキャッシュを自動更新するための署名ハッシュ
+    """
+    sig_obj = {
+        "manual": sorted(GLOBAL_MANUAL_ALGO_MAP.items()),
+        "avoid": sorted(list(GLOBAL_AVOID_NORTHERN)),
+        "buffer": OFFSHORE_BUFFER_DEG
+    }
+    raw = json.dumps(sig_obj, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def load_persistent_route_cache():
+    global _PERSISTENT_ROUTE_CACHE
+    _PERSISTENT_ROUTE_CACHE.clear()
+    if not os.path.exists(ROUTE_CACHE_FILE):
+        return
+    try:
+        with gzip.open(ROUTE_CACHE_FILE, "rt", encoding="utf-8") as f:
+            payload = json.load(f)
+            if payload.get("sig") == get_config_signature():
+                _PERSISTENT_ROUTE_CACHE = payload.get("routes", {})
+                print(f"[INFO] ルートキャッシュを読み込みました: {len(_PERSISTENT_ROUTE_CACHE)} 件", flush=True)
+            else:
+                print("[INFO] 設定変更を検知したため、ルートキャッシュをリフレッシュします。", flush=True)
+    except Exception:
+        _PERSISTENT_ROUTE_CACHE = {}
+
+
+def save_persistent_route_cache():
+    global _ROUTE_CACHE_DIRTY
+    if not _ROUTE_CACHE_DIRTY:
+        return
+    try:
+        # キャッシュ肥大化防止（最新50,000件まで保持）
+        if len(_PERSISTENT_ROUTE_CACHE) > 50000:
+            keys_to_keep = list(_PERSISTENT_ROUTE_CACHE.keys())[-50000:]
+            trimmed = {k: _PERSISTENT_ROUTE_CACHE[k] for k in keys_to_keep}
+        else:
+            trimmed = _PERSISTENT_ROUTE_CACHE
+
+        payload = {
+            "sig": get_config_signature(),
+            "routes": trimmed
+        }
+        with gzip.open(ROUTE_CACHE_FILE, "wt", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        _ROUTE_CACHE_DIRTY = False
+    except Exception:
+        pass
 
 
 def sync_and_load_algorithm_map(client, active_points=None):
@@ -147,7 +209,7 @@ def sync_and_load_algorithm_map(client, active_points=None):
                 rows.append([lat_b, lng_b, count, auto_algo, auto_avoid, manual_algo, manual_avoid, remark_text])
                 
             ws_algo.append_rows(rows)
-            print(f"[INFO] Algorithm_Map シートを {len(rows)-1} エリアで更新しました。")
+            print(f"[INFO] Algorithm_Map シートを {len(rows)-1} エリアで更新しました。", flush=True)
             records = ws_algo.get_all_records()
         else:
             records = existing_data
@@ -176,16 +238,12 @@ def sync_and_load_algorithm_map(client, active_points=None):
             except Exception:
                 pass
                 
-        print(f"[INFO] Algorithm_Map 読み込み完了: 手動固定 {len(GLOBAL_MANUAL_ALGO_MAP)} 件 / 自動エリア {len(GLOBAL_AUTO_ALGO_MAP)} 件 / 回避 {len(GLOBAL_AVOID_NORTHERN)} 件")
+        print(f"[INFO] Algorithm_Map 読み込み完了: 手動固定 {len(GLOBAL_MANUAL_ALGO_MAP)} 件 / 自動エリア {len(GLOBAL_AUTO_ALGO_MAP)} 件", flush=True)
     except Exception as e:
-        print(f"[WARN] Algorithm_Map の処理中にエラーが発生しました: {e}")
+        print(f"[WARN] Algorithm_Map の処理中にエラーが発生しました: {e}", flush=True)
 
 
 def get_manual_override_algorithm(p1, p2):
-    """
-    Algorithm_Map シートの「手動設定（Manual_Algorithm）」がある場合は最優先で返す。
-    東京湾・浦賀水道など手動で「主要航路ベース」に固定された海域はここで確定する。
-    """
     k1 = (math.floor(p1[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
           math.floor(p1[1] / MACRO_RESOLUTION) * MACRO_RESOLUTION)
     k2 = (math.floor(p2[0] / MACRO_RESOLUTION) * MACRO_RESOLUTION, 
@@ -298,10 +356,6 @@ def get_port_dictionary(client):
 
 
 def infer_port_areas_from_fleet(tracks_map, base_port_dict):
-    """
-    他船の仕向地変更実績および停泊（低速滞在）実績から、
-    各仕向地コードの想定寄港エリア（中心座標）を自動学習し、辞書を補完する。
-    """
     effective_dict = dict(base_port_dict)
     dest_lats = defaultdict(list)
     dest_lngs = defaultdict(list)
@@ -350,7 +404,7 @@ def infer_port_areas_from_fleet(tracks_map, base_port_dict):
             inferred_count += 1
 
     if inferred_count > 0:
-        print(f"[INFO] 他船の仕向地変更・停泊実績から {inferred_count} 件の想定寄港エリアを補完しました。")
+        print(f"[INFO] 他船実績から {inferred_count} 件の想定寄港エリアを補完しました。", flush=True)
 
     return effective_dict
 
@@ -412,8 +466,7 @@ def generate_targeted_bboxes(master_map, existing_latest):
         [[-90, -180], [90, 180]] 
     ]
     
-    final_bboxes = targeted_bboxes[:5] + base_bboxes
-    return final_bboxes
+    return targeted_bboxes[:5] + base_bboxes
 
 
 async def process_message_queue(queue, target_mmsis, received):
@@ -458,6 +511,7 @@ async def collect_ais_data(target_mmsis, bboxes):
         return received
     
     duration = 360 if os.environ.get("GITHUB_EVENT_NAME") == "schedule" else 30
+    print(f"[INFO] AISデータ受信開始 ({duration}秒間)...", flush=True)
     url = "wss://stream.aisstream.io/v0/stream"
     sub_msg = {"APIKey": AISSTREAM_API_KEY, "BoundingBoxes": bboxes, "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
     queue = asyncio.Queue()
@@ -480,15 +534,22 @@ async def collect_ais_data(target_mmsis, bboxes):
         
     await queue.join()
     consumer_task.cancel()
+    print(f"[INFO] AISデータ受信完了: {len(received)} 隻受信", flush=True)
     return received
 
 
 def is_point_on_land(lat, lng):
     if not HAS_LAND_MASK:
         return False
+    key = (round(lat, 3), round(lng, 3))
+    cached = _LAND_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
-            return bool(globe.is_land(lat, lng))
+            res = bool(globe.is_land(lat, lng))
+            _LAND_CACHE[key] = res
+            return res
     except Exception:
         pass
     return False
@@ -496,16 +557,24 @@ def is_point_on_land(lat, lng):
 
 def is_point_on_land_with_buffer(lat, lng, buffer_deg=OFFSHORE_BUFFER_DEG):
     """
-    約13km（0.12度）の厳格な離岸バリア（8方向＋中間半径チェック）
+    高速キャッシュ付き約13km離岸バリア判定
     """
+    key = (round(lat, 2), round(lng, 2))
+    cached = _BUFFER_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     if is_point_on_land(lat, lng):
+        _BUFFER_CACHE[key] = True
         return True
     for r in (buffer_deg * 0.5, buffer_deg):
         d = r * 0.7071
         for dy, dx in [(r, 0), (-r, 0), (0, r), (0, -r),
                        (d, d), (d, -d), (-d, d), (-d, -d)]:
             if is_point_on_land(lat + dy, lng + dx):
+                _BUFFER_CACHE[key] = True
                 return True
+    _BUFFER_CACHE[key] = False
     return False
 
 
@@ -524,15 +593,14 @@ def route_crosses_land(coords, use_buffer=True):
         dist = math.hypot(b[0] - a[0], b[1] - a[1])
         if dist == 0: continue
         
-        steps = max(2, int(math.ceil(dist / 0.005)))
+        steps = max(2, int(math.ceil(dist / 0.012)))
         for s in range(1, steps):
             t = s / float(steps)
             lat = a[0] + (b[0] - a[0]) * t
             lng = a[1] + (b[1] - a[1]) * t
             
-            # 素の陸地横断（房総半島などの陸切り）はどんな場合でも絶対禁止
-            if math.hypot(lat - p_start[0], lng - p_start[1]) >= 0.01 and \
-               math.hypot(lat - p_end[0], lng - p_end[1]) >= 0.01:
+            if math.hypot(lat - p_start[0], lng - p_start[1]) >= 0.015 and \
+               math.hypot(lat - p_end[0], lng - p_end[1]) >= 0.015:
                 if is_point_on_land(lat, lng):
                     return True
 
@@ -554,7 +622,7 @@ def intersects_northern_territories(coords):
         dist = math.hypot(b[0] - a[0], b[1] - a[1])
         if dist == 0: continue
         
-        steps = max(2, int(math.ceil(dist / 0.1)))
+        steps = max(2, int(math.ceil(dist / 0.15)))
         for s in range(steps + 1):
             t = s / float(steps)
             lat = a[0] + (b[0] - a[0]) * t
@@ -600,8 +668,8 @@ def get_searoute_path(p1, p2):
             if len(res) > 2:
                 return res
             
-            cands1 = get_offshore_candidates(p1)
-            cands2 = get_offshore_candidates(p2)
+            cands1 = get_offshore_candidates(p1)[:4]
+            cands2 = get_offshore_candidates(p2)[:4]
             for o1 in cands1:
                 for o2 in cands2:
                     try:
@@ -617,23 +685,42 @@ def get_searoute_path(p1, p2):
     return None
 
 
-def string_pull_path(path, max_lookahead=999, use_buffer=True):
+def string_pull_path(path, max_lookahead=120, use_buffer=True):
     """
-    離岸バリアと陸切り防止を厳守しつつ、不必要な折れ曲がりを削ぎ落として
-    実測点同士を円滑な最短変針点で結ぶ。
+    高速ステップ探索付き視界引き締め処理
     """
     if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
     current_idx = 0
+    n = len(path)
     
-    while current_idx < len(path) - 1:
+    while current_idx < n - 1:
         furthest_visible_idx = current_idx + 1
-        search_end = min(len(path) - 1, current_idx + max_lookahead)
-        for check_idx in range(search_end, current_idx, -1):
-            if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
-                furthest_visible_idx = check_idx
-                break
+        search_end = min(n - 1, current_idx + max_lookahead)
+        span = search_end - current_idx
+        
+        if span <= 12:
+            for check_idx in range(search_end, current_idx, -1):
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                    furthest_visible_idx = check_idx
+                    break
+        else:
+            # 粗いステップで先に到達可能位置を特定し、局所精査する高速探索
+            coarse_step = max(2, span // 10)
+            best_coarse = current_idx + 1
+            for check_idx in range(search_end, current_idx, -coarse_step):
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                    best_coarse = check_idx
+                    break
+            fine_end = min(search_end, best_coarse + coarse_step - 1)
+            for check_idx in range(fine_end, best_coarse - 1, -1):
+                if check_idx <= current_idx:
+                    break
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                    furthest_visible_idx = check_idx
+                    break
+
         smoothed_path.append(path[furthest_visible_idx])
         current_idx = furthest_visible_idx
     return smoothed_path
@@ -656,9 +743,7 @@ def moving_average_smooth(path, window_size=7):
 
 def get_crowd_sourced_path(p1, p2, strict_buffer=True):
     """
-    A*探索による実測ベースルート生成。
-    港付近（バリア内）の端点から出発する場合は、外洋側へ脱出することを許可しつつ、
-    外洋からのバリア内進入を強くブロックして岸壁張り付きと断続化を同時に防ぐ。
+    優先度付きキュー（heapq）を用いた高速A*探索
     """
     global GLOBAL_SAFE_GRIDS
     resolution = 0.20
@@ -668,19 +753,22 @@ def get_crowd_sourced_path(p1, p2, strict_buffer=True):
     if math.hypot(start_gk[0]-end_gk[0], start_gk[1]-end_gk[1]) <= 1.5:
         return [p1, p2]
         
-    open_set = {start_gk}
-    came_from = {}
-    g_score = {start_gk: 0}
-    
     def heuristic(node):
-        return math.hypot(node[0]-end_gk[0], node[1]-end_gk[1]) * 1.0
-        
-    f_score = {start_gk: heuristic(start_gk)}
+        return math.hypot(node[0]-end_gk[0], node[1]-end_gk[1]) * 1.05
+
+    open_heap = [(heuristic(start_gk), 0.0, start_gk)]
+    came_from = {}
+    g_score = {start_gk: 0.0}
+    closed_set = set()
     
     iterations = 0
-    while open_set and iterations < 30000:
+    while open_heap and iterations < 9000:
         iterations += 1
-        current = min(open_set, key=lambda x: f_score.get(x, float('inf')))
+        _, curr_g, current = heapq.heappop(open_heap)
+        
+        if current in closed_set:
+            continue
+        closed_set.add(current)
         
         if current == end_gk:
             path = [p2]
@@ -696,34 +784,33 @@ def get_crowd_sourced_path(p1, p2, strict_buffer=True):
                 return path
                 
             smoothed_path = moving_average_smooth(path, window_size=7)
-            return string_pull_path(smoothed_path, max_lookahead=999, use_buffer=strict_buffer)
+            return string_pull_path(smoothed_path, max_lookahead=120, use_buffer=strict_buffer)
             
-        open_set.remove(current)
         curr_in_buf = is_point_on_land_with_buffer(current[0]*resolution, current[1]*resolution)
         
-        for dx, dy in [(0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)]:
+        for dx, dy in ((0,1),(1,0),(0,-1),(-1,0),(1,1),(1,-1),(-1,1),(-1,-1)):
             neighbor = (current[0]+dx, current[1]+dy)
-            dist = math.hypot(dx, dy)
+            if neighbor in closed_set:
+                continue
+            dist = 1.4142 if (dx != 0 and dy != 0) else 1.0
             n_lat = neighbor[0] * resolution
             n_lng = neighbor[1] * resolution
             
             if neighbor != end_gk and is_point_on_land(n_lat, n_lng):
                 penalty = 2000.0
             elif strict_buffer and neighbor != end_gk and is_point_on_land_with_buffer(n_lat, n_lng):
-                # 既にバリア内（港湾付近）にいる場合は外洋へ脱出できるようコストを抑える
                 penalty = 18.0 if curr_in_buf else 500.0
             elif neighbor in GLOBAL_SAFE_GRIDS:
                 penalty = 1.0
             else:
                 penalty = 1.20
                     
-            tentative_g = g_score[current] + (dist * penalty)
+            tentative_g = curr_g + (dist * penalty)
             
             if tentative_g < g_score.get(neighbor, float('inf')):
                 came_from[neighbor] = current
                 g_score[neighbor] = tentative_g
-                f_score[neighbor] = tentative_g + heuristic(neighbor)
-                open_set.add(neighbor)
+                heapq.heappush(open_heap, (tentative_g + heuristic(neighbor), tentative_g, neighbor))
                 
     return None
 
@@ -838,10 +925,6 @@ def smooth_path_chaikin(coords, iterations=4, max_step_deg=1.5):
 
 
 def compute_corridor_coverage(p1, p2):
-    """
-    2点間を結ぶコリドー（航路帯）上に他船の実測実績（GLOBAL_SAFE_GRIDS）が
-    どの程度の割合で存在するか（0.0〜1.0）を評価する。
-    """
     if not GLOBAL_SAFE_GRIDS:
         return 0.0
     resolution = 0.20
@@ -860,14 +943,10 @@ def compute_corridor_coverage(p1, p2):
     return hits / float(steps + 1)
 
 
-def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, time_diff_hrs=None, allow_relaxed_detour=False):
-    """
-    生成された候補ルート（測定点ベース vs 主要航路ベース）の品質を採点する。
-    """
+def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, allow_relaxed_detour=False):
     if not coords or len(coords) < 2:
         return -999999.0
 
-    # 1. 絶対失格条件（素の陸地横断・北方領土/竹島侵入）
     if route_crosses_land(coords, use_buffer=False):
         return -999999.0
     if intersects_northern_territories(coords):
@@ -876,13 +955,6 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, time_
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     route_dist = sum(math.hypot(coords[i+1][0] - coords[i][0], coords[i+1][1] - coords[i][1]) for i in range(len(coords) - 1))
 
-    # 2. 速度整合性チェック
-    if time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
-        speed_knots = (route_dist * 60.0) / time_diff_hrs
-        if speed_knots > MAX_GENERAL_SPEED_KNOTS:
-            return -999999.0
-
-    # 3. 迂回率制限チェック
     max_detour = 4.5 if (is_main_candidate or allow_relaxed_detour) else 2.8
     max_excess = 1.2 if (is_main_candidate or allow_relaxed_detour) else 0.75
     if route_dist > (straight_dist * max_detour) and (route_dist - straight_dist) > max_excess:
@@ -890,16 +962,13 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, time_
 
     score = 100.0
 
-    # 4. 13km離岸バリア遵守評価（侵入した場合は大幅減点するが、港湾付近では完全失格にせずフォールバック可能にする）
     if route_crosses_land(coords, use_buffer=True):
         score -= 40.0
 
-    # 5. 迂回コスト減点
     detour_ratio = route_dist / max(straight_dist, 0.05)
     if detour_ratio > 1.0:
         score -= (detour_ratio - 1.0) * 16.0
 
-    # 6. スパイク・急角度折れ曲がり減点
     for i in range(1, len(coords) - 1):
         v1x, v1y = coords[i][0] - coords[i-1][0], coords[i][1] - coords[i-1][1]
         v2x, v2y = coords[i+1][0] - coords[i][0], coords[i+1][1] - coords[i][1]
@@ -911,13 +980,11 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, time_
             elif cos_t < 0.5:
                 score -= 10.0 * (0.5 - cos_t)
 
-    # 7. 他船実測航路帯（緑エリア）との一致ボーナス
     if GLOBAL_SAFE_GRIDS:
         resolution = 0.20
         hits = sum(1 for c in coords if (int(round(c[0]/resolution)), int(round(c[1]/resolution))) in GLOBAL_SAFE_GRIDS)
         score += (hits / float(len(coords))) * 15.0
 
-    # 8. 区間特性に応じた適合ボーナス
     direct_hits_land = route_crosses_land([p1, p2], use_buffer=False)
     if not is_main_candidate:
         if corridor_cov >= 0.45 and straight_dist < 4.5:
@@ -932,47 +999,46 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, time_
 
 
 def finalize_endpoints(res, p1, p2):
-    if abs(res[0][0] - p1[0]) > 0.001 or abs(res[0][1] - p1[1]) > 0.001:
-        res.insert(0, p1)
+    out = [list(pt) for pt in res]
+    if abs(out[0][0] - p1[0]) > 0.001 or abs(out[0][1] - p1[1]) > 0.001:
+        out.insert(0, list(p1))
     else:
-        res[0] = p1
-    if abs(res[-1][0] - p2[0]) > 0.001 or abs(res[-1][1] - p2[1]) > 0.001:
-        res.append(p2)
+        out[0] = list(p1)
+    if abs(out[-1][0] - p2[0]) > 0.001 or abs(out[-1][1] - p2[1]) > 0.001:
+        out.append(list(p2))
     else:
-        res[-1] = p2
-    return res
+        out[-1] = list(p2)
+    return out
 
 
-def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
+def _compute_base_geometry(p1, p2, is_port_route=False):
     """
-    区間ごとの動的評価＆トーナメント採点方式により、
-    「他船実測点ベース」と「主要航路ベース」の最適ルートを自動選択する。
+    2点間のジオメトリ（経路座標列）を計算するコア関数（永続キャッシュ対象）
     """
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     manual_algo = get_manual_override_algorithm(p1, p2)
     
-    # 寄港ルート（港アプローチ）の場合は13kmバリアを緩和して接続を優先
     if is_port_route:
         if straight_dist < 0.35 and not route_crosses_land([p1, p2], use_buffer=False) and not intersects_northern_territories([p1, p2]):
             return [p1, p2]
         if manual_algo == "主要航路ベース":
             sr_res = query_valid_searoute(p1, p2)
             if sr_res:
-                sr_res = string_pull_path(subdivide_long_segments(sr_res, 0.15), max_lookahead=8, use_buffer=False)
-                return finalize_endpoints(sr_res, p1, p2)
-        cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=False)
-        if cs_res and not route_crosses_land(cs_res, use_buffer=False) and not intersects_northern_territories(cs_res):
-            return finalize_endpoints(cs_res, p1, p2)
+                return string_pull_path(subdivide_long_segments(sr_res, 0.15), max_lookahead=8, use_buffer=False)
+        if straight_dist <= 12.0:
+            cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=False)
+            if cs_res and not route_crosses_land(cs_res, use_buffer=False) and not intersects_northern_territories(cs_res):
+                return cs_res
         sr_res = query_valid_searoute(p1, p2)
         if sr_res:
-            return finalize_endpoints(sr_res, p1, p2)
+            return sr_res
         return None
 
     direct_crosses_buf = route_crosses_land([p1, p2], use_buffer=True)
     direct_crosses_raw = route_crosses_land([p1, p2], use_buffer=False)
     direct_northern    = intersects_northern_territories([p1, p2])
 
-    # 1. 手動固定設定（東京湾の主要航路固定など）がある場合
+    # 1. 手動固定設定（東京湾の主要航路固定など）
     if manual_algo == "主要航路ベース":
         if straight_dist < 0.25 and not direct_crosses_buf and not direct_northern:
             return [p1, p2]
@@ -981,72 +1047,96 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
             sr_res = subdivide_long_segments(sr_res, max_step_deg=0.15)
             sr_res = string_pull_path(sr_res, max_lookahead=12, use_buffer=True)
             sr_res = remove_d_spikes(sr_res, is_port_visit=False)
-            if score_candidate_route(sr_res, p1, p2, True, 0.5, time_diff_hrs, allow_relaxed_detour=True) > -500000:
-                return finalize_endpoints(sr_res, p1, p2)
-        # 主要航路が失敗した場合でも断続化を防ぐためA*へフォールバック
-        cs_fb = get_crowd_sourced_path(p1, p2, strict_buffer=False)
-        if cs_fb and score_candidate_route(cs_fb, p1, p2, False, 0.5, time_diff_hrs, allow_relaxed_detour=True) > -500000:
-            return finalize_endpoints(cs_fb, p1, p2)
+            if score_candidate_route(sr_res, p1, p2, True, 0.5, allow_relaxed_detour=True) > -500000:
+                return sr_res
+        if straight_dist <= 12.0:
+            cs_fb = get_crowd_sourced_path(p1, p2, strict_buffer=False)
+            if cs_fb and score_candidate_route(cs_fb, p1, p2, False, 0.5, allow_relaxed_detour=True) > -500000:
+                return cs_fb
         return None
 
     if manual_algo == "測定点ベース":
         if straight_dist < 2.5 and not direct_crosses_buf and not direct_northern:
             return [p1, p2]
-        cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=True)
-        if cs_res:
-            cs_res = remove_d_spikes(cs_res, is_port_visit=False)
-            if score_candidate_route(cs_res, p1, p2, False, 0.8, time_diff_hrs) > -500000:
-                return finalize_endpoints(cs_res, p1, p2)
+        if straight_dist <= 12.0:
+            cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=True)
+            if cs_res:
+                cs_res = remove_d_spikes(cs_res, is_port_visit=False)
+                if score_candidate_route(cs_res, p1, p2, False, 0.8) > -500000:
+                    return cs_res
 
-    # 2. 自動評価区間：障害物・バリアに触れない近〜中距離（約220km以内）は円滑直線を最優先
+    # 2. 自動評価区間：障害物・バリアに触れない近〜中距離（約220km以内）は即決
     if straight_dist < 2.0 and not direct_crosses_buf and not direct_northern:
         return [p1, p2]
 
-    # 3. トーナメント採点方式：「測定点ベース」と「主要航路ベース」の両候補を生成して評価
+    # 3. トーナメント採点方式（1,300km超の大洋横断はsearoute直接採用で高速化）
     corridor_cov = compute_corridor_coverage(p1, p2)
     candidates = []
 
-    # 候補A: 測定点ベース（13km離岸バリア厳守A*）
-    cs_cand = get_crowd_sourced_path(p1, p2, strict_buffer=True)
-    if cs_cand:
-        cs_cand = remove_d_spikes(cs_cand, is_port_visit=False)
-        sc_a = score_candidate_route(cs_cand, p1, p2, False, corridor_cov, time_diff_hrs)
-        if sc_a > -500000:
-            candidates.append((sc_a, cs_cand))
+    if straight_dist <= 12.0:
+        cs_cand = get_crowd_sourced_path(p1, p2, strict_buffer=True)
+        if cs_cand:
+            cs_cand = remove_d_spikes(cs_cand, is_port_visit=False)
+            sc_a = score_candidate_route(cs_cand, p1, p2, False, corridor_cov)
+            if sc_a > -500000:
+                candidates.append((sc_a, cs_cand))
 
-    # 候補B: 主要航路ベース（searoute）
     sr_cand = query_valid_searoute(p1, p2)
     if sr_cand:
         sr_cand = subdivide_long_segments(sr_cand, max_step_deg=0.15)
-        sr_cand = string_pull_path(sr_cand, max_lookahead=999, use_buffer=True)
+        sr_cand = string_pull_path(sr_cand, max_lookahead=120, use_buffer=True)
         sr_cand = remove_d_spikes(sr_cand, is_port_visit=False)
-        sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov, time_diff_hrs)
+        sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov)
         if sc_b > -500000:
             candidates.append((sc_b, sr_cand))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return finalize_endpoints(candidates[0][1], p1, p2)
+        return candidates[0][1]
 
-    # 4. 断続化防止フォールバック（港湾付近・岬の近傍で厳格バリアが厳しすぎた場合の救済）
+    # 4. 断続化防止フォールバック
     if not direct_crosses_raw and not direct_northern and straight_dist < 1.2:
         return [p1, p2]
 
-    cs_relaxed = get_crowd_sourced_path(p1, p2, strict_buffer=False)
-    if cs_relaxed:
-        cs_relaxed = remove_d_spikes(cs_relaxed, is_port_visit=False)
-        if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, time_diff_hrs, allow_relaxed_detour=True) > -500000:
-            return finalize_endpoints(cs_relaxed, p1, p2)
+    if straight_dist <= 12.0:
+        cs_relaxed = get_crowd_sourced_path(p1, p2, strict_buffer=False)
+        if cs_relaxed:
+            cs_relaxed = remove_d_spikes(cs_relaxed, is_port_visit=False)
+            if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, allow_relaxed_detour=True) > -500000:
+                return cs_relaxed
 
     return None
 
 
+def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
+    """
+    キャッシュ対応の高速ルート補完ラッパー
+    """
+    global _ROUTE_CACHE_DIRTY
+    cache_key = f"{round(p1[0], 3)},{round(p1[1], 3)}->{round(p2[0], 3)},{round(p2[1], 3)}|{'P' if is_port_route else 'S'}"
+    
+    if cache_key in _PERSISTENT_ROUTE_CACHE:
+        base_res = _PERSISTENT_ROUTE_CACHE[cache_key]
+    else:
+        base_res = _compute_base_geometry(p1, p2, is_port_route=is_port_route)
+        _PERSISTENT_ROUTE_CACHE[cache_key] = base_res
+        _ROUTE_CACHE_DIRTY = True
+
+    if not base_res or len(base_res) < 2:
+        return None
+
+    res = finalize_endpoints(base_res, p1, p2)
+
+    if not is_port_route and time_diff_hrs and time_diff_hrs >= MIN_TIME_HRS_FOR_SPEED:
+        route_dist = sum(math.hypot(res[i+1][0] - res[i][0], res[i+1][1] - res[i][1]) for i in range(len(res) - 1))
+        speed_knots = (route_dist * 60.0) / time_diff_hrs
+        if speed_knots > MAX_GENERAL_SPEED_KNOTS:
+            return None
+
+    return res
+
+
 def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_hrs, effective_port_dict):
-    """
-    途中で仕向地が変更になっている場合、その地点（旧仕向地）に寄港した軌跡を描く。
-    ただし、仕向地は一定のエリア（PORT_AREA_RADIUS_DEG ≒ 約50km）であり、
-    前後の実測点がすでにそのエリア付近にあれば無理に往復軌跡を描かない。
-    """
     p_dest = str(prev_dest).strip().upper()
     c_dest = str(curr_dest).strip().upper()
     
@@ -1104,6 +1194,7 @@ def register_segment_to_grid(p1, p2, mmsi, grid_map, grid_size):
 
 
 def update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict):
+    t_start = time.time()
     now_utc = datetime.now(timezone.utc)
     month_str = now_utc.strftime("%Y-%m")
     
@@ -1229,6 +1320,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     calculated_headings = {}
     grid_all_map = defaultdict(set)
     GRID_SIZE = 0.08
+
+    print(f"[INFO] 軌跡計算開始: 対象 {len(tracks_map)} 隻...", flush=True)
 
     for mmsi, data_list in tracks_map.items():
         if not data_list:
@@ -1366,7 +1459,6 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             de_spiked = remove_d_spikes(sub_sampled, is_port_visit=has_port)
             smoothed = smooth_path_chaikin(de_spiked, iterations=4, max_step_deg=1.5)
             
-            # 素の陸地横断（房総半島など）または北方領土・竹島侵入が起きた場合はタイトなカーブ半径で再試行し、それでもダメなら元軌跡を維持
             if route_crosses_land(smoothed, use_buffer=False) or intersects_northern_territories(smoothed):
                 smoothed_tight = smooth_path_chaikin(de_spiked, iterations=3, max_step_deg=0.4)
                 if not route_crosses_land(smoothed_tight, use_buffer=False) and not intersects_northern_territories(smoothed_tight):
@@ -1441,10 +1533,13 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
 
+    save_persistent_route_cache()
+    print(f"[INFO] 軌跡計算完了: {len(routes_output)} 隻 (所要時間: {round(time.time() - t_start, 1)}秒)", flush=True)
     return calculated_headings
 
 
 def update_coverage_from_all_latest(existing_latest):
+    t_cov = time.time()
     current_time = time.time()
     six_months_ago = current_time - EXPIRATION_SECONDS
 
@@ -1480,9 +1575,11 @@ def update_coverage_from_all_latest(existing_latest):
         json.dump(merged_points, f, ensure_ascii=False)
 
     if active_points:
+        # 高速化：近接点を0.05度（約5.5km）グリッドに集約し、頂点数を抑えて高速結合
+        snapped_coords = {(round(lat * 20.0) / 20.0, round(lng * 20.0) / 20.0) for lat, lng in active_points.keys()}
         BUFFER_DEG = 0.33
-        circles = [Point(lng, lat).buffer(BUFFER_DEG) for lat, lng in active_points.keys()]
-        merged_polygon = unary_union(circles)
+        circles = [Point(lng, lat).buffer(BUFFER_DEG, quad_segs=6) for lat, lng in snapped_coords]
+        merged_polygon = unary_union(circles).simplify(0.01, preserve_topology=True)
         
         coverage_geojson = {
             "type": "FeatureCollection",
@@ -1500,15 +1597,18 @@ def update_coverage_from_all_latest(existing_latest):
         with open(COVERAGE_FILE, "w", encoding="utf-8") as f:
             json.dump(coverage_geojson, f, ensure_ascii=False)
 
+    print(f"[INFO] カバレッジ更新完了 ({round(time.time() - t_cov, 1)}秒)", flush=True)
     return list(active_points.keys())
 
 
 def main():
+    t_total = time.time()
     client = get_spreadsheet_client()
     if not client:
         return
         
     sync_and_load_algorithm_map(client)
+    load_persistent_route_cache()
     
     port_dict, existing_ais_names = get_port_dictionary(client)
     master_map, master_counts = get_master_data(client)
@@ -1612,9 +1712,11 @@ def main():
             sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
             append_data = [[d, "", ""] for d in sorted(list(new_dests))]
             sheet.append_rows(append_data)
-            print(f"[INFO] 辞書に {len(new_dests)} 件の新しい仕向地を追加しました。")
+            print(f"[INFO] 辞書に {len(new_dests)} 件の新しい仕向地を追加しました。", flush=True)
         except Exception:
             pass
+
+    print(f"[INFO] 全処理正常完了 (合計所要時間: {round(time.time() - t_total, 1)}秒)", flush=True)
 
 
 if __name__ == "__main__":
