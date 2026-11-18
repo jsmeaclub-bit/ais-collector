@@ -62,7 +62,7 @@ SPIKE_LEG_MIN_DEG       = 0.15
 TSUGARU_STRAIT = [41.45, 140.55]
 SOYA_STRAIT    = [45.65, 141.95]
 
-OFFSHORE_BUFFER_DEG  = 0.12  # 約13kmの厳格な離岸バリア
+OFFSHORE_BUFFER_DEG  = 0.12  # 約13kmの離岸バリア（外洋・一般沿岸用）
 PORT_AREA_RADIUS_DEG = 0.45  # 仕向地エリア半径（約50km圏内なら無理な往復補完をしない）
 
 GLOBAL_SAFE_GRIDS = set()
@@ -74,6 +74,7 @@ MACRO_RESOLUTION = 2.0
 # 高速化用メモリキャッシュ
 _LAND_CACHE = {}
 _BUFFER_CACHE = {}
+_DEEP_INLAND_CACHE = {}
 _PERSISTENT_ROUTE_CACHE = {}
 _ROUTE_CACHE_DIRTY = False
 
@@ -88,9 +89,10 @@ def get_spreadsheet_client():
 
 def get_config_signature():
     """
-    手動設定や回避エリアが変更された場合にキャッシュを自動更新するための署名ハッシュ
+    手動設定やロジックバージョンが変更された場合にキャッシュを自動更新するための署名ハッシュ
     """
     sig_obj = {
+        "v": 3,
         "manual": sorted(GLOBAL_MANUAL_ALGO_MAP.items()),
         "avoid": sorted(list(GLOBAL_AVOID_NORTHERN)),
         "buffer": OFFSHORE_BUFFER_DEG
@@ -111,7 +113,7 @@ def load_persistent_route_cache():
                 _PERSISTENT_ROUTE_CACHE = payload.get("routes", {})
                 print(f"[INFO] ルートキャッシュを読み込みました: {len(_PERSISTENT_ROUTE_CACHE)} 件", flush=True)
             else:
-                print("[INFO] 設定変更を検知したため、ルートキャッシュをリフレッシュします。", flush=True)
+                print("[INFO] ルール更新を検知したため、ルートキャッシュをリフレッシュします。", flush=True)
     except Exception:
         _PERSISTENT_ROUTE_CACHE = {}
 
@@ -121,7 +123,6 @@ def save_persistent_route_cache():
     if not _ROUTE_CACHE_DIRTY:
         return
     try:
-        # キャッシュ肥大化防止（最新50,000件まで保持）
         if len(_PERSISTENT_ROUTE_CACHE) > 50000:
             keys_to_keep = list(_PERSISTENT_ROUTE_CACHE.keys())[-50000:]
             trimmed = {k: _PERSISTENT_ROUTE_CACHE[k] for k in keys_to_keep}
@@ -140,10 +141,6 @@ def save_persistent_route_cache():
 
 
 def sync_and_load_algorithm_map(client, active_points=None):
-    """
-    Algorithm_Mapシートを最新の実測点密度で更新し（手動設定・備考は完全保持）、
-    「手動固定設定」と「自動判定結果」を分けてメモリへ読み込む。
-    """
     global GLOBAL_MANUAL_ALGO_MAP, GLOBAL_AUTO_ALGO_MAP, GLOBAL_AVOID_NORTHERN
     GLOBAL_MANUAL_ALGO_MAP.clear()
     GLOBAL_AUTO_ALGO_MAP.clear()
@@ -241,6 +238,18 @@ def sync_and_load_algorithm_map(client, active_points=None):
         print(f"[INFO] Algorithm_Map 読み込み完了: 手動固定 {len(GLOBAL_MANUAL_ALGO_MAP)} 件 / 自動エリア {len(GLOBAL_AUTO_ALGO_MAP)} 件", flush=True)
     except Exception as e:
         print(f"[WARN] Algorithm_Map の処理中にエラーが発生しました: {e}", flush=True)
+
+
+def is_narrow_strait_zone(p1, p2):
+    for pt in (p1, p2):
+        lat, lng = pt[0], pt[1]
+        if 0.8 <= lat <= 2.2 and 103.0 <= lng <= 104.8:
+            return True
+        if 1.5 <= lat <= 3.5 and 100.5 <= lng <= 103.0:
+            return True
+        if 33.5 <= lat <= 35.7 and 130.7 <= lng <= 140.1:
+            return True
+    return False
 
 
 def get_manual_override_algorithm(p1, p2):
@@ -355,6 +364,52 @@ def get_port_dictionary(client):
     return port_dict, existing_ais_names
 
 
+def is_point_on_land(lat, lng):
+    if not HAS_LAND_MASK:
+        return False
+    key = (round(lat, 3), round(lng, 3))
+    cached = _LAND_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
+            res = bool(globe.is_land(lat, lng))
+            _LAND_CACHE[key] = res
+            return res
+    except Exception:
+        pass
+    return False
+
+
+def is_deep_inland(lat, lng, coast_tolerance_deg=0.045):
+    """
+    港の岸壁（海から約5km以内）ではなく、アルジェリア内陸のような
+    「完全な内陸（GPS異常測位）」であるかを判定する。
+    """
+    if not HAS_LAND_MASK:
+        return False
+    key = (round(lat, 2), round(lng, 2))
+    cached = _DEEP_INLAND_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if not is_point_on_land(lat, lng):
+        _DEEP_INLAND_CACHE[key] = False
+        return False
+
+    # 周囲約5km（8方向）に1つでも海があれば港湾・沿岸とみなす
+    d = coast_tolerance_deg * 0.7071
+    for dy, dx in [(coast_tolerance_deg, 0), (-coast_tolerance_deg, 0),
+                   (0, coast_tolerance_deg), (0, -coast_tolerance_deg),
+                   (d, d), (d, -d), (-d, d), (-d, -d)]:
+        if not is_point_on_land(lat + dy, lng + dx):
+            _DEEP_INLAND_CACHE[key] = False
+            return False
+
+    _DEEP_INLAND_CACHE[key] = True
+    return True
+
+
 def infer_port_areas_from_fleet(tracks_map, base_port_dict):
     effective_dict = dict(base_port_dict)
     dest_lats = defaultdict(list)
@@ -368,6 +423,8 @@ def infer_port_areas_from_fleet(tracks_map, base_port_dict):
         prev_pt = None
 
         for ts, pt, idx, r_dest, r_spd in sorted_items:
+            if is_deep_inland(pt[0], pt[1]):
+                continue
             d_clean = str(r_dest).strip().upper()
             if d_clean in ("-", "NONE", ""):
                 d_clean = prev_dest
@@ -395,6 +452,8 @@ def infer_port_areas_from_fleet(tracks_map, base_port_dict):
         if len(lats) >= 3:
             med_lat = round(statistics.median(lats), 4)
             med_lng = round(statistics.median(dest_lngs[dest_code]), 4)
+            if is_deep_inland(med_lat, med_lng):
+                continue
             effective_dict[dest_code] = {
                 "name": f"{dest_code}(他船実績推定)",
                 "lat": med_lat,
@@ -487,11 +546,15 @@ async def process_message_queue(queue, target_mmsis, received):
                 msg_type = data.get("MessageType")
                 if msg_type == "PositionReport":
                     pos = data.get("Message", {}).get("PositionReport", {})
-                    received[mmsi]["lat"] = pos.get("Latitude", received[mmsi]["lat"])
-                    received[mmsi]["lng"] = pos.get("Longitude", received[mmsi]["lng"])
-                    received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
-                    if data.get("MetaData", {}).get("time_utc"):
-                        received[mmsi]["timestamp"] = data.get("MetaData", {}).get("time_utc")
+                    lat_v = pos.get("Latitude")
+                    lng_v = pos.get("Longitude")
+                    # 内陸のGPSスプーフィング異常値は受信時点で破棄
+                    if lat_v is not None and lng_v is not None and not is_deep_inland(lat_v, lng_v):
+                        received[mmsi]["lat"] = lat_v
+                        received[mmsi]["lng"] = lng_v
+                        received[mmsi]["speed"] = round(pos.get("Sog", 0.0), 1)
+                        if data.get("MetaData", {}).get("time_utc"):
+                            received[mmsi]["timestamp"] = data.get("MetaData", {}).get("time_utc")
                 elif msg_type == "ShipStaticData":
                     static = data.get("Message", {}).get("ShipStaticData", {})
                     if dest := static.get("Destination", "").strip():
@@ -538,27 +601,7 @@ async def collect_ais_data(target_mmsis, bboxes):
     return received
 
 
-def is_point_on_land(lat, lng):
-    if not HAS_LAND_MASK:
-        return False
-    key = (round(lat, 3), round(lng, 3))
-    cached = _LAND_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
-        if -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0:
-            res = bool(globe.is_land(lat, lng))
-            _LAND_CACHE[key] = res
-            return res
-    except Exception:
-        pass
-    return False
-
-
 def is_point_on_land_with_buffer(lat, lng, buffer_deg=OFFSHORE_BUFFER_DEG):
-    """
-    高速キャッシュ付き約13km離岸バリア判定
-    """
     key = (round(lat, 2), round(lng, 2))
     cached = _BUFFER_CACHE.get(key)
     if cached is not None:
@@ -593,7 +636,7 @@ def route_crosses_land(coords, use_buffer=True):
         dist = math.hypot(b[0] - a[0], b[1] - a[1])
         if dist == 0: continue
         
-        steps = max(2, int(math.ceil(dist / 0.012)))
+        steps = max(2, int(math.ceil(dist / 0.008)))
         for s in range(1, steps):
             t = s / float(steps)
             lat = a[0] + (b[0] - a[0]) * t
@@ -605,9 +648,9 @@ def route_crosses_land(coords, use_buffer=True):
                     return True
 
             if use_buffer:
-                if start_in_buffer and math.hypot(lat - p_start[0], lng - p_start[1]) < OFFSHORE_BUFFER_DEG * 1.15:
+                if start_in_buffer and math.hypot(lat - p_start[0], lng - p_start[1]) < OFFSHORE_BUFFER_DEG * 1.2:
                     continue
-                if end_in_buffer and math.hypot(lat - p_end[0], lng - p_end[1]) < OFFSHORE_BUFFER_DEG * 1.15:
+                if end_in_buffer and math.hypot(lat - p_end[0], lng - p_end[1]) < OFFSHORE_BUFFER_DEG * 1.2:
                     continue
                 if is_point_on_land_with_buffer(lat, lng):
                     return True
@@ -642,7 +685,7 @@ def intersects_northern_territories(coords):
 def get_offshore_candidates(pt):
     candidates = []
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707)]
-    for radius in (0.05, 0.15, 0.25):
+    for radius in (0.03, 0.08, 0.15, 0.25):
         for dy, dx in dirs:
             n_lat, n_lng = round(pt[0] + dy * radius, 4), round(pt[1] + dx * radius, 4)
             if not is_point_on_land(n_lat, n_lng):
@@ -651,12 +694,17 @@ def get_offshore_candidates(pt):
 
 
 def get_port_approach_point(port_pos):
+    """
+    内陸座標であればNoneを返し、海岸付近であれば最寄りの海上座標を返す。
+    """
+    if is_deep_inland(port_pos[0], port_pos[1]):
+        return None
     if not is_point_on_land(port_pos[0], port_pos[1]):
         return port_pos
     cands = get_offshore_candidates(port_pos)
     if cands:
         return cands[0]
-    return port_pos
+    return None
 
 
 def get_searoute_path(p1, p2):
@@ -668,8 +716,8 @@ def get_searoute_path(p1, p2):
             if len(res) > 2:
                 return res
             
-            cands1 = get_offshore_candidates(p1)[:4]
-            cands2 = get_offshore_candidates(p2)[:4]
+            cands1 = get_offshore_candidates(p1)[:5]
+            cands2 = get_offshore_candidates(p2)[:5]
             for o1 in cands1:
                 for o2 in cands2:
                     try:
@@ -686,9 +734,6 @@ def get_searoute_path(p1, p2):
 
 
 def string_pull_path(path, max_lookahead=120, use_buffer=True):
-    """
-    高速ステップ探索付き視界引き締め処理
-    """
     if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
@@ -706,7 +751,6 @@ def string_pull_path(path, max_lookahead=120, use_buffer=True):
                     furthest_visible_idx = check_idx
                     break
         else:
-            # 粗いステップで先に到達可能位置を特定し、局所精査する高速探索
             coarse_step = max(2, span // 10)
             best_coarse = current_idx + 1
             for check_idx in range(search_end, current_idx, -coarse_step):
@@ -742,9 +786,6 @@ def moving_average_smooth(path, window_size=7):
 
 
 def get_crowd_sourced_path(p1, p2, strict_buffer=True):
-    """
-    優先度付きキュー（heapq）を用いた高速A*探索
-    """
     global GLOBAL_SAFE_GRIDS
     resolution = 0.20
     start_gk = (int(round(p1[0] / resolution)), int(round(p1[1] / resolution)))
@@ -803,7 +844,7 @@ def get_crowd_sourced_path(p1, p2, strict_buffer=True):
             elif neighbor in GLOBAL_SAFE_GRIDS:
                 penalty = 1.0
             else:
-                penalty = 1.20
+                penalty = 1.25
                     
             tentative_g = curr_g + (dist * penalty)
             
@@ -943,11 +984,14 @@ def compute_corridor_coverage(p1, p2):
     return hits / float(steps + 1)
 
 
-def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, allow_relaxed_detour=False):
+def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_strait_or_manual=False):
     if not coords or len(coords) < 2:
         return -999999.0
 
+    # 1. 絶対失格条件（素の陸地横断・内陸座標侵入・北方領土/竹島侵入）
     if route_crosses_land(coords, use_buffer=False):
+        return -999999.0
+    if any(is_deep_inland(c[0], c[1]) for c in coords):
         return -999999.0
     if intersects_northern_territories(coords):
         return -999999.0
@@ -955,19 +999,26 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, allow
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     route_dist = sum(math.hypot(coords[i+1][0] - coords[i][0], coords[i+1][1] - coords[i][1]) for i in range(len(coords) - 1))
 
-    max_detour = 4.5 if (is_main_candidate or allow_relaxed_detour) else 2.8
-    max_excess = 1.2 if (is_main_candidate or allow_relaxed_detour) else 0.75
+    if is_strait_or_manual:
+        max_detour = 25.0
+        max_excess = 3.5
+    else:
+        max_detour = 4.5 if is_main_candidate else 3.0
+        max_excess = 1.2 if is_main_candidate else 0.85
+
     if route_dist > (straight_dist * max_detour) and (route_dist - straight_dist) > max_excess:
         return -999999.0
 
     score = 100.0
 
-    if route_crosses_land(coords, use_buffer=True):
-        score -= 40.0
+    if not is_strait_or_manual:
+        if route_crosses_land(coords, use_buffer=True):
+            score -= 35.0
 
     detour_ratio = route_dist / max(straight_dist, 0.05)
     if detour_ratio > 1.0:
-        score -= (detour_ratio - 1.0) * 16.0
+        penalty_weight = 4.0 if is_strait_or_manual else 14.0
+        score -= (detour_ratio - 1.0) * penalty_weight
 
     for i in range(1, len(coords) - 1):
         v1x, v1y = coords[i][0] - coords[i-1][0], coords[i][1] - coords[i-1][1]
@@ -976,24 +1027,24 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, allow
         if n1 > 0.02 and n2 > 0.02:
             cos_t = (v1x * v2x + v1y * v2y) / (n1 * n2)
             if cos_t < 0.0:
-                score -= 30.0 * abs(cos_t)
+                score -= 25.0 * abs(cos_t)
             elif cos_t < 0.5:
-                score -= 10.0 * (0.5 - cos_t)
+                score -= 8.0 * (0.5 - cos_t)
 
     if GLOBAL_SAFE_GRIDS:
         resolution = 0.20
         hits = sum(1 for c in coords if (int(round(c[0]/resolution)), int(round(c[1]/resolution))) in GLOBAL_SAFE_GRIDS)
-        score += (hits / float(len(coords))) * 15.0
+        score += (hits / float(len(coords))) * 18.0
 
-    direct_hits_land = route_crosses_land([p1, p2], use_buffer=False)
-    if not is_main_candidate:
-        if corridor_cov >= 0.45 and straight_dist < 4.5:
-            score += 12.0
-    else:
-        if straight_dist >= 5.0:
-            score += 12.0
-        if direct_hits_land and straight_dist < 3.0:
-            score += 14.0
+    if not is_strait_or_manual:
+        if not is_main_candidate:
+            if corridor_cov >= 0.30 and straight_dist <= 8.0:
+                score += 35.0
+        else:
+            if corridor_cov >= 0.30 and straight_dist <= 8.0:
+                score -= 20.0
+            elif straight_dist > 8.0:
+                score += 15.0
 
     return score
 
@@ -1012,25 +1063,27 @@ def finalize_endpoints(res, p1, p2):
 
 
 def _compute_base_geometry(p1, p2, is_port_route=False):
-    """
-    2点間のジオメトリ（経路座標列）を計算するコア関数（永続キャッシュ対象）
-    """
+    # いずれかの端点が完全な内陸（GPS異常値）にある場合はルート生成を拒否
+    if is_deep_inland(p1[0], p1[1]) or is_deep_inland(p2[0], p2[1]):
+        return None
+
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     manual_algo = get_manual_override_algorithm(p1, p2)
+    is_strait = is_narrow_strait_zone(p1, p2)
     
     if is_port_route:
         if straight_dist < 0.35 and not route_crosses_land([p1, p2], use_buffer=False) and not intersects_northern_territories([p1, p2]):
             return [p1, p2]
-        if manual_algo == "主要航路ベース":
+        if manual_algo == "主要航路ベース" or is_strait:
             sr_res = query_valid_searoute(p1, p2)
-            if sr_res:
-                return string_pull_path(subdivide_long_segments(sr_res, 0.15), max_lookahead=8, use_buffer=False)
+            if sr_res and not route_crosses_land(sr_res, use_buffer=False):
+                return string_pull_path(subdivide_long_segments(sr_res, 0.10), max_lookahead=8, use_buffer=False)
         if straight_dist <= 12.0:
             cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=False)
             if cs_res and not route_crosses_land(cs_res, use_buffer=False) and not intersects_northern_territories(cs_res):
                 return cs_res
         sr_res = query_valid_searoute(p1, p2)
-        if sr_res:
+        if sr_res and not route_crosses_land(sr_res, use_buffer=False):
             return sr_res
         return None
 
@@ -1038,20 +1091,19 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
     direct_crosses_raw = route_crosses_land([p1, p2], use_buffer=False)
     direct_northern    = intersects_northern_territories([p1, p2])
 
-    # 1. 手動固定設定（東京湾の主要航路固定など）
-    if manual_algo == "主要航路ベース":
-        if straight_dist < 0.25 and not direct_crosses_buf and not direct_northern:
+    if manual_algo == "主要航路ベース" or is_strait:
+        if straight_dist < 0.15 and not direct_crosses_raw and not direct_northern:
             return [p1, p2]
         sr_res = query_valid_searoute(p1, p2)
         if sr_res:
-            sr_res = subdivide_long_segments(sr_res, max_step_deg=0.15)
-            sr_res = string_pull_path(sr_res, max_lookahead=12, use_buffer=True)
-            sr_res = remove_d_spikes(sr_res, is_port_visit=False)
-            if score_candidate_route(sr_res, p1, p2, True, 0.5, allow_relaxed_detour=True) > -500000:
-                return sr_res
+            sr_pulled = string_pull_path(subdivide_long_segments(sr_res, 0.08), max_lookahead=10, use_buffer=False)
+            if score_candidate_route(sr_pulled, p1, p2, True, 0.5, is_strait_or_manual=True) > -500000:
+                return sr_pulled
+        if not direct_crosses_raw and not direct_northern and straight_dist < 0.8:
+            return [p1, p2]
         if straight_dist <= 12.0:
             cs_fb = get_crowd_sourced_path(p1, p2, strict_buffer=False)
-            if cs_fb and score_candidate_route(cs_fb, p1, p2, False, 0.5, allow_relaxed_detour=True) > -500000:
+            if cs_fb and score_candidate_route(cs_fb, p1, p2, False, 0.5, is_strait_or_manual=True) > -500000:
                 return cs_fb
         return None
 
@@ -1065,11 +1117,9 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
                 if score_candidate_route(cs_res, p1, p2, False, 0.8) > -500000:
                     return cs_res
 
-    # 2. 自動評価区間：障害物・バリアに触れない近〜中距離（約220km以内）は即決
     if straight_dist < 2.0 and not direct_crosses_buf and not direct_northern:
         return [p1, p2]
 
-    # 3. トーナメント採点方式（1,300km超の大洋横断はsearoute直接採用で高速化）
     corridor_cov = compute_corridor_coverage(p1, p2)
     candidates = []
 
@@ -1077,7 +1127,7 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
         cs_cand = get_crowd_sourced_path(p1, p2, strict_buffer=True)
         if cs_cand:
             cs_cand = remove_d_spikes(cs_cand, is_port_visit=False)
-            sc_a = score_candidate_route(cs_cand, p1, p2, False, corridor_cov)
+            sc_a = score_candidate_route(cs_cand, p1, p2, False, corridor_cov, is_strait_or_manual=False)
             if sc_a > -500000:
                 candidates.append((sc_a, cs_cand))
 
@@ -1086,7 +1136,7 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
         sr_cand = subdivide_long_segments(sr_cand, max_step_deg=0.15)
         sr_cand = string_pull_path(sr_cand, max_lookahead=120, use_buffer=True)
         sr_cand = remove_d_spikes(sr_cand, is_port_visit=False)
-        sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov)
+        sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov, is_strait_or_manual=False)
         if sc_b > -500000:
             candidates.append((sc_b, sr_cand))
 
@@ -1094,7 +1144,6 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
         candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1]
 
-    # 4. 断続化防止フォールバック
     if not direct_crosses_raw and not direct_northern and straight_dist < 1.2:
         return [p1, p2]
 
@@ -1102,16 +1151,13 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
         cs_relaxed = get_crowd_sourced_path(p1, p2, strict_buffer=False)
         if cs_relaxed:
             cs_relaxed = remove_d_spikes(cs_relaxed, is_port_visit=False)
-            if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, allow_relaxed_detour=True) > -500000:
+            if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, is_strait_or_manual=True) > -500000:
                 return cs_relaxed
 
     return None
 
 
 def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False, prev_speed=0.0):
-    """
-    キャッシュ対応の高速ルート補完ラッパー
-    """
     global _ROUTE_CACHE_DIRTY
     cache_key = f"{round(p1[0], 3)},{round(p1[1], 3)}->{round(p2[0], 3)},{round(p2[1], 3)}|{'P' if is_port_route else 'S'}"
     
@@ -1158,6 +1204,8 @@ def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_h
         return None
         
     port_approach = get_port_approach_point(raw_port_pos)
+    if not port_approach:
+        return None
     
     dist_deg = math.hypot(prev_p[0] - port_approach[0], prev_p[1] - port_approach[1]) + \
                math.hypot(curr_p[0] - port_approach[0], curr_p[1] - port_approach[1])
@@ -1207,6 +1255,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         if mmsi not in master_map:
             continue
         if ship["lat"] is None or ship["lng"] is None:
+            continue
+        if is_deep_inland(ship["lat"], ship["lng"]):
             continue
         timestamp = now_utc.strftime("%Y/%m/%d %H:%M:%S")
         dest = ship.get("destination", "")
@@ -1283,6 +1333,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                             lng_val = float(r_lng)
                             if not (-90.0 <= lat_val <= 90.0 and -180.0 <= lng_val <= 180.0):
                                 continue
+                            # 完全な内陸座標（GPS異常値）を履歴読み込み時に除外
+                            if is_deep_inland(lat_val, lng_val):
+                                continue
                             ts = robust_parse_timestamp(r_ts)
                             if ts == datetime.min:
                                 continue
@@ -1304,7 +1357,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             with open(COVERAGE_POINTS_FILE, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
                 for item in raw_data:
-                    if len(item) >= 2:
+                    if len(item) >= 2 and not is_deep_inland(item[0], item[1]):
                         gk = (int(round(item[0] / CROWD_RESOLUTION)), int(round(item[1] / CROWD_RESOLUTION)))
                         GLOBAL_SAFE_GRIDS.add(gk)
         except Exception:
@@ -1331,6 +1384,8 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         cleaned_list = []
         for item in data_list:
             ts, pt, idx, r_dest, r_spd = item
+            if is_deep_inland(pt[0], pt[1]):
+                continue
             if not cleaned_list:
                 cleaned_list.append([ts, pt, r_spd, r_dest])
                 continue
@@ -1354,29 +1409,30 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 
         latest_coord = None
         if mmsi in existing_latest and existing_latest[mmsi].get("lat") is not None and existing_latest[mmsi].get("lng") is not None:
-            curr_lat = existing_latest[mmsi]["lat"]
-            curr_lng = existing_latest[mmsi]["lng"]
-            curr_spd = existing_latest[mmsi].get("speed", 0.0)
-            curr_dest = str(existing_latest[mmsi].get("destination", "")).strip().upper()
-            latest_coord = [round(float(curr_lat), 4), round(float(curr_lng), 4)]
-            latest_ts_str = existing_latest[mmsi].get("timestamp", "")
-            latest_ts = robust_parse_timestamp(latest_ts_str)
-            if latest_ts == datetime.min:
-                latest_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+            curr_lat = float(existing_latest[mmsi]["lat"])
+            curr_lng = float(existing_latest[mmsi]["lng"])
+            if not is_deep_inland(curr_lat, curr_lng):
+                curr_spd = existing_latest[mmsi].get("speed", 0.0)
+                curr_dest = str(existing_latest[mmsi].get("destination", "")).strip().upper()
+                latest_coord = [round(curr_lat, 4), round(curr_lng, 4)]
+                latest_ts_str = existing_latest[mmsi].get("timestamp", "")
+                latest_ts = robust_parse_timestamp(latest_ts_str)
+                if latest_ts == datetime.min:
+                    latest_ts = datetime.now(timezone.utc).replace(tzinfo=None)
 
-            if not cleaned_list:
-                cleaned_list.append([latest_ts, latest_coord, curr_spd, curr_dest])
-            elif cleaned_list[-1][1] != latest_coord:
-                last_ts, last_pt, last_s, last_d = cleaned_list[-1]
-                time_diff_hrs = (latest_ts - last_ts).total_seconds() / 3600.0
-                if time_diff_hrs > 0:
-                    dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
-                    if not (dist_nm > 3.0 and (dist_nm / time_diff_hrs) > 50.0):
-                        eff_dest = curr_dest if (curr_dest and curr_dest not in ("-", "NONE")) else last_d
-                        cleaned_list.append([latest_ts, latest_coord, curr_spd, eff_dest])
-            else:
-                if curr_dest and curr_dest not in ("-", "NONE"):
-                    cleaned_list[-1][3] = curr_dest
+                if not cleaned_list:
+                    cleaned_list.append([latest_ts, latest_coord, curr_spd, curr_dest])
+                elif cleaned_list[-1][1] != latest_coord:
+                    last_ts, last_pt, last_s, last_d = cleaned_list[-1]
+                    time_diff_hrs = (latest_ts - last_ts).total_seconds() / 3600.0
+                    if time_diff_hrs > 0:
+                        dist_nm = math.hypot(latest_coord[0] - last_pt[0], latest_coord[1] - last_pt[1]) * 60.0
+                        if not (dist_nm > 3.0 and (dist_nm / time_diff_hrs) > 50.0):
+                            eff_dest = curr_dest if (curr_dest and curr_dest not in ("-", "NONE")) else last_d
+                            cleaned_list.append([latest_ts, latest_coord, curr_spd, eff_dest])
+                else:
+                    if curr_dest and curr_dest not in ("-", "NONE"):
+                        cleaned_list[-1][3] = curr_dest
 
         if cleaned_list and mmsi not in existing_latest:
             last_t, last_p, last_s, last_d = cleaned_list[-1]
@@ -1549,7 +1605,7 @@ def update_coverage_from_all_latest(existing_latest):
             with open(COVERAGE_POINTS_FILE, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
                 for item in raw_data:
-                    if len(item) >= 2:
+                    if len(item) >= 2 and not is_deep_inland(item[0], item[1]):
                         lat, lng = item[0], item[1]
                         ts = item[2] if len(item) >= 3 else current_time
                         existing_points_dict[(lat, lng)] = ts
@@ -1559,7 +1615,7 @@ def update_coverage_from_all_latest(existing_latest):
     for mmsi, ship in existing_latest.items():
         lat = ship.get("lat")
         lng = ship.get("lng")
-        if lat is not None and lng is not None:
+        if lat is not None and lng is not None and not is_deep_inland(float(lat), float(lng)):
             ts_str = ship.get("timestamp", "")
             dt = robust_parse_timestamp(ts_str)
             ts = dt.replace(tzinfo=timezone.utc).timestamp() if dt != datetime.min else current_time
@@ -1575,7 +1631,6 @@ def update_coverage_from_all_latest(existing_latest):
         json.dump(merged_points, f, ensure_ascii=False)
 
     if active_points:
-        # 高速化：近接点を0.05度（約5.5km）グリッドに集約し、頂点数を抑えて高速結合
         snapped_coords = {(round(lat * 20.0) / 20.0, round(lng * 20.0) / 20.0) for lat, lng in active_points.keys()}
         BUFFER_DEG = 0.33
         circles = [Point(lng, lat).buffer(BUFFER_DEG, quad_segs=6) for lat, lng in snapped_coords]
@@ -1620,7 +1675,8 @@ def main():
                 for s in json.load(f).get("latest", []):
                     m_key = str(s.get("mmsi", "")).strip().split(".")[0]
                     if m_key and m_key in master_map and s.get("lat") is not None and s.get("lng") is not None:
-                        existing_latest[m_key] = s
+                        if not is_deep_inland(float(s["lat"]), float(s["lng"])):
+                            existing_latest[m_key] = s
         except Exception:
             pass
 
@@ -1636,6 +1692,8 @@ def main():
         new_lat = ship["lat"] if ship["lat"] is not None else prev.get("lat")
         new_lng = ship["lng"] if ship["lng"] is not None else prev.get("lng")
         if new_lat is None or new_lng is None:
+            continue
+        if is_deep_inland(float(new_lat), float(new_lng)):
             continue
 
         new_speed = ship["speed"] if ship["lat"] is not None else prev.get("speed", 0.0)
