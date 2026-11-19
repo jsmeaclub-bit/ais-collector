@@ -96,7 +96,7 @@ def get_config_signature():
     手動設定やロジックバージョンが変更された場合にキャッシュを自動更新するための署名ハッシュ
     """
     sig_obj = {
-        "v": 10,
+        "v": 11,
         "manual": sorted(GLOBAL_MANUAL_ALGO_MAP.items()),
         "avoid": sorted(list(GLOBAL_AVOID_NORTHERN)),
         "buffer": OFFSHORE_BUFFER_DEG
@@ -261,6 +261,26 @@ def is_narrow_strait_zone(p1, p2):
             return True
         if 33.5 <= lat <= 35.7 and 130.7 <= lng <= 140.1:
             return True
+    return False
+
+
+def is_archipelago_or_canal_point(lat, lng):
+    """
+    インドネシア多島海・東南アジア海峡・サハリン・瀬戸内海・スエズ/パナマ運河など、
+    1kmメッシュの陸地判定よりも主要航路（searoute）を優先すべき複雑海域。
+    """
+    # 東南アジア多島海・マラッカ・スンダ・ロンボク・トレス海峡（シンガポール〜オーストラリア含む）
+    if -12.0 <= lat <= 8.0 and 95.0 <= lng <= 145.0:
+        return True
+    # 日本沿岸・瀬戸内海・宗谷海峡・サハリン
+    if 30.0 <= lat <= 54.5 and 128.0 <= lng <= 147.0:
+        return True
+    # スエズ運河・紅海狭部
+    if 12.0 <= lat <= 32.0 and 32.0 <= lng <= 44.0:
+        return True
+    # パナマ運河
+    if 8.5 <= lat <= 9.8 and -80.2 <= lng <= -79.2:
+        return True
     return False
 
 
@@ -639,12 +659,11 @@ def is_point_on_land_with_buffer(lat, lng, buffer_deg=OFFSHORE_BUFFER_DEG):
 
 def route_crosses_land(coords, use_buffer=True, allow_johore_real=False, is_searoute_native=False):
     """
-    主要航路（is_searoute_native=True）は global-land-mask の陸地判定より優先し、
-    多島海・運河・狭水道であっても無条件で海上航路として扱う。
+    is_searoute_native=True（主要航路由来）の場合は、
+    多島海・海峡・運河（東南アジア、サハリン、スエズ等）における1kmメッシュの誤差（約16kmまで）を許容し、
+    それ以外の一般大陸沿岸（南アフリカ南東岸等）では約4.5km以上の陸地食い込みをブロックして
+    13km離岸バリア付きの滑らかなA*補完へ委ねる。
     """
-    if is_searoute_native:
-        return False
-
     if not HAS_LAND_MASK or len(coords) < 2:
         return False
 
@@ -658,13 +677,18 @@ def route_crosses_land(coords, use_buffer=True, allow_johore_real=False, is_sear
     start_exempt_rad = 0.03 if start_on_coast_mesh else 0.012
     end_exempt_rad   = 0.03 if end_on_coast_mesh else 0.012
 
+    consecutive_land_deg = 0.0
+
     for i in range(len(coords) - 1):
         a = coords[i]
         b = coords[i + 1]
         dist = math.hypot(b[0] - a[0], b[1] - a[1])
         if dist == 0: continue
         
-        steps = max(2, int(math.ceil(dist / 0.005)))
+        step_size = 0.005
+        steps = max(2, int(math.ceil(dist / step_size)))
+        actual_step_deg = dist / float(steps)
+
         for s in range(1, steps):
             t = s / float(steps)
             lat = a[0] + (b[0] - a[0]) * t
@@ -676,9 +700,16 @@ def route_crosses_land(coords, use_buffer=True, allow_johore_real=False, is_sear
             if not in_start_port and not in_end_port:
                 if is_point_on_land(lat, lng):
                     if allow_johore_real and is_near_johore_real_point(lat, lng):
-                        pass
+                        consecutive_land_deg = 0.0
+                    elif is_searoute_native:
+                        consecutive_land_deg += actual_step_deg
+                        limit_deg = 0.15 if is_archipelago_or_canal_point(lat, lng) else 0.04
+                        if consecutive_land_deg >= limit_deg:
+                            return True
                     else:
                         return True
+                else:
+                    consecutive_land_deg = 0.0
 
             if use_buffer:
                 if start_in_buffer and math.hypot(lat - p_start[0], lng - p_start[1]) < OFFSHORE_BUFFER_DEG * 1.2:
@@ -738,10 +769,6 @@ def get_port_approach_point(port_pos):
 
 
 def get_searoute_path(p1, p2):
-    """
-    陸地判定より主要航路（searoute）を優先するため、
-    まずは座標をそのまま searoute に渡して本来の海上航路ネットワークを直接取得する。
-    """
     straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     try:
         route = sr.searoute((p1[1], p1[0]), (p2[1], p2[0]))
@@ -750,13 +777,11 @@ def get_searoute_path(p1, p2):
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
             if len(res) > 2:
                 return res
-            # 2点のみの直線で返った場合、短距離海上なら有効、長距離陸横断なら候補点スナップを試行
             if straight_dist <= 0.5 or not route_crosses_land([p1, p2], use_buffer=False):
                 return res
     except Exception:
         pass
 
-    # フォールバック：近傍の海上候補点へスナップして再取得
     cands1 = [p1] + get_offshore_candidates(p1)[:4]
     cands2 = [p2] + get_offshore_candidates(p2)[:4]
     for o1 in cands1:
@@ -884,7 +909,8 @@ def get_sakhalin_main_route(p1, p2):
         leg_to_soya = build_sakhalin_leg(p1)
         main_leg = query_valid_searoute(SOYA_MAIN_GATE, p2)
         if main_leg:
-            combined = leg_to_soya + main_leg[1:]
+            main_pulled = string_pull_path(subdivide_long_segments(main_leg, 0.25), max_lookahead=40, use_buffer=True)
+            combined = leg_to_soya + main_pulled[1:]
             if not intersects_northern_territories(combined):
                 return combined
         cs_leg = get_crowd_sourced_path(SOYA_MAIN_GATE, p2, strict_buffer=False)
@@ -895,7 +921,8 @@ def get_sakhalin_main_route(p1, p2):
         leg_from_soya = list(reversed(build_sakhalin_leg(p2)))
         main_leg = query_valid_searoute(p1, SOYA_MAIN_GATE)
         if main_leg:
-            combined = main_leg + leg_from_soya[1:]
+            main_pulled = string_pull_path(subdivide_long_segments(main_leg, 0.25), max_lookahead=40, use_buffer=True)
+            combined = main_pulled + leg_from_soya[1:]
             if not intersects_northern_territories(combined):
                 return combined
         cs_leg = get_crowd_sourced_path(p1, SOYA_MAIN_GATE, strict_buffer=False)
@@ -993,8 +1020,13 @@ def get_local_strait_path(p1, p2):
     return None
 
 
-def string_pull_path(path, max_lookahead=120, use_buffer=True, allow_johore_real=False, is_searoute_native=False):
-    if len(path) <= 2 or is_searoute_native:
+def string_pull_path(path, max_lookahead=120, use_buffer=True, allow_johore_real=False):
+    """
+    視界引き締め処理：
+    南アフリカ沖西のような外洋のV字折り返しは陸地・離岸バリアがないため一直線に引き締め、
+    多島海や岬の迂回区間ではショートカット線が陸地に当たるため元の経由点をそのまま保持する。
+    """
+    if len(path) <= 2:
         return path
     smoothed_path = [path[0]]
     current_idx = 0
@@ -1247,7 +1279,7 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
     if not coords or len(coords) < 2:
         return -999999.0
 
-    # 1. 絶対失格条件（主要航路候補は陸地判定より優先し、北方領土/竹島侵入のみ失格）
+    # 1. 絶対失格条件（多島海・運河では主要航路を優先し、大陸沿岸の食い込みと北方領土/竹島侵入を失格とする）
     if route_crosses_land(coords, use_buffer=False, is_searoute_native=is_main_candidate):
         return -999999.0
     if not is_main_candidate and any(is_deep_inland(c[0], c[1]) for c in coords):
@@ -1287,9 +1319,9 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
         if n1 > 0.02 and n2 > 0.02:
             cos_t = (v1x * v2x + v1y * v2y) / (n1 * n2)
             if cos_t < 0.0:
-                score -= (10.0 if is_main_candidate else 22.0) * abs(cos_t)
+                score -= (14.0 if is_main_candidate else 22.0) * abs(cos_t)
             elif cos_t < 0.5:
-                score -= (3.0 if is_main_candidate else 7.0) * (0.5 - cos_t)
+                score -= (4.0 if is_main_candidate else 7.0) * (0.5 - cos_t)
 
     if GLOBAL_SAFE_GRIDS:
         resolution = 0.20
@@ -1352,10 +1384,10 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
     if is_port_route:
         if straight_dist < 0.25 and not route_crosses_land([p1, p2], use_buffer=False) and not intersects_northern_territories([p1, p2]):
             return [p1, p2]
-        # 寄港ルートも陸地判定より主要航路を優先
         sr_res = query_valid_searoute(p1, p2)
         if sr_res and not intersects_northern_territories(sr_res):
-            return sr_res
+            sr_pulled = string_pull_path(subdivide_long_segments(sr_res, 0.25), max_lookahead=30, use_buffer=True)
+            return remove_d_spikes(sr_pulled, protect_turns=False)
         if manual_algo == "主要航路ベース" or is_strait:
             local_res = get_local_strait_path(p1, p2)
             if local_res and not route_crosses_land(local_res, use_buffer=False):
@@ -1376,7 +1408,8 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             return [p1, p2]
         sr_res = query_valid_searoute(p1, p2)
         if sr_res:
-            return sr_res
+            sr_pulled = string_pull_path(subdivide_long_segments(sr_res, 0.20), max_lookahead=25, use_buffer=False)
+            return remove_d_spikes(sr_pulled, protect_turns=False)
         local_strait = get_local_strait_path(p1, p2)
         if local_strait and score_candidate_route(local_strait, p1, p2, False, 0.5, is_strait_or_manual=True) > -500000:
             return local_strait
@@ -1405,7 +1438,7 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
     corridor_cov = compute_corridor_coverage(p1, p2)
     candidates = []
 
-    # 候補A：他船実測点ベース（外洋実測帯用）
+    # 候補A：他船実測点ベース（13km離岸バリア遵守）
     if straight_dist <= 12.0:
         cs_cand = get_crowd_sourced_path(p1, p2, strict_buffer=True)
         if cs_cand:
@@ -1414,9 +1447,12 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             if sc_a > -500000:
                 candidates.append((sc_a, cs_cand))
 
-    # 候補B：主要航路（searoute） — 陸地判定より優先して評価し、本来の主要航路形状を保持
+    # 候補B：主要航路（searoute） — 外洋のV字フックを引き締めつつ、多島海・海峡の迂回ノードは保持
     sr_cand = query_valid_searoute(p1, p2)
     if sr_cand:
+        sr_cand = subdivide_long_segments(sr_cand, max_step_deg=0.25)
+        sr_cand = string_pull_path(sr_cand, max_lookahead=50, use_buffer=True)
+        sr_cand = remove_d_spikes(sr_cand, protect_turns=False)
         sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov, is_strait_or_manual=False)
         if sc_b > -500000:
             candidates.append((sc_b, sr_cand))
@@ -1781,8 +1817,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                 elif is_sakhalin_point(prev_p) or is_sakhalin_point(curr_p) or is_narrow_strait_zone(prev_p, curr_p) or get_manual_override_algorithm(prev_p, curr_p) == "主要航路ベース":
                     curr_protect = True
                     curr_searoute = True
-                elif route_crosses_land([prev_p, curr_p], use_buffer=True):
-                    # 海岸線・陸地付近で主要航路が採用された区間は平滑化後も陸地判定で破棄しない
+                elif is_archipelago_or_canal_point(prev_p[0], prev_p[1]) or is_archipelago_or_canal_point(curr_p[0], curr_p[1]):
                     curr_searoute = True
             
             if interpolated and len(interpolated) >= 2:
