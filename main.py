@@ -59,10 +59,11 @@ MIN_TIME_HRS_FOR_SPEED  = 1.0
 SPIKE_COS_THETA         = -0.25
 SPIKE_LEG_MIN_DEG       = 0.15
 
-TSUGARU_STRAIT = [41.45, 140.55]
-SOYA_STRAIT    = [45.65, 141.95]
-SOYA_MAIN_GATE = [45.72, 142.05]
-ANIWA_BAY_GATE = [46.15, 142.75]
+TSUGARU_STRAIT   = [41.45, 140.55]
+SOYA_STRAIT      = [45.65, 141.95]
+SOYA_MAIN_GATE   = [45.72, 142.05]
+ANIWA_BAY_GATE   = [46.15, 142.75]
+JOHORE_EAST_GATE = [1.32, 104.08]
 
 OFFSHORE_BUFFER_DEG  = 0.12  # 約13kmの離岸バリア（実測・直線補完側のガードレール）
 PORT_AREA_RADIUS_DEG = 0.45  # 仕向地エリア半径（約50km圏内なら無理な往復補完をしない）
@@ -95,7 +96,7 @@ def get_config_signature():
     手動設定やロジックバージョンが変更された場合にキャッシュを自動更新するための署名ハッシュ
     """
     sig_obj = {
-        "v": 8,
+        "v": 10,
         "manual": sorted(GLOBAL_MANUAL_ALGO_MAP.items()),
         "avoid": sorted(list(GLOBAL_AVOID_NORTHERN)),
         "buffer": OFFSHORE_BUFFER_DEG
@@ -392,7 +393,7 @@ def is_point_on_land(lat, lng):
     return False
 
 
-def is_near_johore_real_point(lat, lng, radius_deg=0.035):
+def is_near_johore_real_point(lat, lng, radius_deg=0.008):
     if not (0.9 <= lat <= 2.1 and 103.2 <= lng <= 104.6):
         return False
     for r_lat, r_lng in JOHORE_REAL_POINTS:
@@ -636,7 +637,14 @@ def is_point_on_land_with_buffer(lat, lng, buffer_deg=OFFSHORE_BUFFER_DEG):
     return False
 
 
-def route_crosses_land(coords, use_buffer=True, allow_johore_real=False):
+def route_crosses_land(coords, use_buffer=True, allow_johore_real=False, is_searoute_native=False):
+    """
+    主要航路（is_searoute_native=True）は global-land-mask の陸地判定より優先し、
+    多島海・運河・狭水道であっても無条件で海上航路として扱う。
+    """
+    if is_searoute_native:
+        return False
+
     if not HAS_LAND_MASK or len(coords) < 2:
         return False
 
@@ -730,44 +738,38 @@ def get_port_approach_point(port_pos):
 
 
 def get_searoute_path(p1, p2):
+    """
+    陸地判定より主要航路（searoute）を優先するため、
+    まずは座標をそのまま searoute に渡して本来の海上航路ネットワークを直接取得する。
+    """
+    straight_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
     try:
-        s1 = p1
-        s2 = p2
-        snapped = False
-        if is_point_on_land(p1[0], p1[1]):
-            c1 = get_offshore_candidates(p1)
-            if c1:
-                s1 = c1[0]
-                snapped = True
-        if is_point_on_land(p2[0], p2[1]):
-            c2 = get_offshore_candidates(p2)
-            if c2:
-                s2 = c2[0]
-                snapped = True
-
-        route = sr.searoute((s1[1], s1[0]), (s2[1], s2[0]))
+        route = sr.searoute((p1[1], p1[0]), (p2[1], p2[0]))
         coords = route.get("geometry", {}).get("coordinates", [])
         if coords and len(coords) >= 2:
             res = [[round(c[1], 4), round(c[0], 4)] for c in coords]
-            if snapped:
-                res = [p1] + res + [p2]
             if len(res) > 2:
                 return res
-            
-            cands1 = get_offshore_candidates(p1)[:5]
-            cands2 = get_offshore_candidates(p2)[:5]
-            for o1 in cands1:
-                for o2 in cands2:
-                    try:
-                        alt_route = sr.searoute((o1[1], o1[0]), (o2[1], o2[0]))
-                        alt_coords = alt_route.get("geometry", {}).get("coordinates", [])
-                        if alt_coords and len(alt_coords) > 2:
-                            return [p1] + [[round(c[1], 4), round(c[0], 4)] for c in alt_coords] + [p2]
-                    except Exception:
-                        pass
-            return res
+            # 2点のみの直線で返った場合、短距離海上なら有効、長距離陸横断なら候補点スナップを試行
+            if straight_dist <= 0.5 or not route_crosses_land([p1, p2], use_buffer=False):
+                return res
     except Exception:
         pass
+
+    # フォールバック：近傍の海上候補点へスナップして再取得
+    cands1 = [p1] + get_offshore_candidates(p1)[:4]
+    cands2 = [p2] + get_offshore_candidates(p2)[:4]
+    for o1 in cands1:
+        for o2 in cands2:
+            if o1 == p1 and o2 == p2:
+                continue
+            try:
+                alt_route = sr.searoute((o1[1], o1[0]), (o2[1], o2[0]))
+                alt_coords = alt_route.get("geometry", {}).get("coordinates", [])
+                if alt_coords and len(alt_coords) > 2:
+                    return [p1] + [[round(c[1], 4), round(c[0], 4)] for c in alt_coords] + [p2]
+            except Exception:
+                pass
     return None
 
 
@@ -776,6 +778,27 @@ def get_johore_crowd_path(p1, p2):
     if straight_dist > 1.5:
         return None
 
+    p1_east_johore = (p1[0] >= 1.38 and p1[1] >= 103.88)
+    p2_east_johore = (p2[0] >= 1.38 and p2[1] >= 103.88)
+    p1_south_strait = (p1[0] <= 1.30)
+    p2_south_strait = (p2[0] <= 1.30)
+
+    if (p1_east_johore and p2_south_strait) or (p2_east_johore and p1_south_strait):
+        g_lat, g_lng = JOHORE_EAST_GATE
+        if is_point_on_land(g_lat, g_lng):
+            cands = get_offshore_candidates(JOHORE_EAST_GATE)
+            if cands:
+                g_lat, g_lng = cands[0]
+        gate = [g_lat, g_lng]
+        leg1 = _run_johore_astar(p1, gate)
+        leg2 = _run_johore_astar(gate, p2)
+        if leg1 and leg2:
+            return leg1 + leg2[1:]
+
+    return _run_johore_astar(p1, p2)
+
+
+def _run_johore_astar(p1, p2):
     resolution = 0.012
     start_gk = (int(round(p1[0] / resolution)), int(round(p1[1] / resolution)))
     end_gk = (int(round(p2[0] / resolution)), int(round(p2[1] / resolution)))
@@ -813,7 +836,7 @@ def get_johore_crowd_path(p1, p2):
             path.reverse()
 
             smoothed_path = moving_average_smooth(path, window_size=5)
-            pulled = string_pull_path(smoothed_path, max_lookahead=18, use_buffer=False, allow_johore_real=True)
+            pulled = string_pull_path(smoothed_path, max_lookahead=12, use_buffer=False, allow_johore_real=True)
             if not route_crosses_land(pulled, use_buffer=False, allow_johore_real=True):
                 return pulled
             return path
@@ -826,7 +849,7 @@ def get_johore_crowd_path(p1, p2):
             n_lat = neighbor[0] * resolution
             n_lng = neighbor[1] * resolution
 
-            near_real = is_near_johore_real_point(n_lat, n_lng, radius_deg=0.035)
+            near_real = is_near_johore_real_point(n_lat, n_lng, radius_deg=0.008)
             if near_real:
                 penalty = 1.0
             elif neighbor != end_gk and is_point_on_land(n_lat, n_lng):
@@ -861,8 +884,7 @@ def get_sakhalin_main_route(p1, p2):
         leg_to_soya = build_sakhalin_leg(p1)
         main_leg = query_valid_searoute(SOYA_MAIN_GATE, p2)
         if main_leg:
-            main_pulled = string_pull_path(subdivide_long_segments(main_leg, 0.15), max_lookahead=80, use_buffer=False)
-            combined = leg_to_soya + main_pulled[1:]
+            combined = leg_to_soya + main_leg[1:]
             if not intersects_northern_territories(combined):
                 return combined
         cs_leg = get_crowd_sourced_path(SOYA_MAIN_GATE, p2, strict_buffer=False)
@@ -873,8 +895,7 @@ def get_sakhalin_main_route(p1, p2):
         leg_from_soya = list(reversed(build_sakhalin_leg(p2)))
         main_leg = query_valid_searoute(p1, SOYA_MAIN_GATE)
         if main_leg:
-            main_pulled = string_pull_path(subdivide_long_segments(main_leg, 0.15), max_lookahead=80, use_buffer=False)
-            combined = main_pulled + leg_from_soya[1:]
+            combined = main_leg + leg_from_soya[1:]
             if not intersects_northern_territories(combined):
                 return combined
         cs_leg = get_crowd_sourced_path(p1, SOYA_MAIN_GATE, strict_buffer=False)
@@ -883,7 +904,7 @@ def get_sakhalin_main_route(p1, p2):
 
     else:
         sr_res = query_valid_searoute(p1, p2)
-        if sr_res and not route_crosses_land(sr_res, use_buffer=False):
+        if sr_res:
             return sr_res
         if not route_crosses_land([p1, p2], use_buffer=False):
             return [p1, p2]
@@ -972,8 +993,8 @@ def get_local_strait_path(p1, p2):
     return None
 
 
-def string_pull_path(path, max_lookahead=120, use_buffer=True, allow_johore_real=False):
-    if len(path) <= 2:
+def string_pull_path(path, max_lookahead=120, use_buffer=True, allow_johore_real=False, is_searoute_native=False):
+    if len(path) <= 2 or is_searoute_native:
         return path
     smoothed_path = [path[0]]
     current_idx = 0
@@ -986,21 +1007,21 @@ def string_pull_path(path, max_lookahead=120, use_buffer=True, allow_johore_real
         
         if span <= 12:
             for check_idx in range(search_end, current_idx, -1):
-                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real, is_searoute_native=False) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
                     furthest_visible_idx = check_idx
                     break
         else:
             coarse_step = max(2, span // 10)
             best_coarse = current_idx + 1
             for check_idx in range(search_end, current_idx, -coarse_step):
-                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real, is_searoute_native=False) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
                     best_coarse = check_idx
                     break
             fine_end = min(search_end, best_coarse + coarse_step - 1)
             for check_idx in range(fine_end, best_coarse - 1, -1):
                 if check_idx <= current_idx:
                     break
-                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
+                if not route_crosses_land([path[current_idx], path[check_idx]], use_buffer=use_buffer, allow_johore_real=allow_johore_real, is_searoute_native=False) and not intersects_northern_territories([path[current_idx], path[check_idx]]):
                     furthest_visible_idx = check_idx
                     break
 
@@ -1024,9 +1045,8 @@ def moving_average_smooth(path, window_size=7):
     return smoothed
 
 
-def get_crowd_sourced_path(p1, p2, strict_buffer=True):
+def get_crowd_sourced_path(p1, p2, strict_buffer=True, resolution=0.20):
     global GLOBAL_SAFE_GRIDS
-    resolution = 0.20
     start_gk = (int(round(p1[0] / resolution)), int(round(p1[1] / resolution)))
     end_gk = (int(round(p2[0] / resolution)), int(round(p2[1] / resolution)))
     
@@ -1042,7 +1062,7 @@ def get_crowd_sourced_path(p1, p2, strict_buffer=True):
     closed_set = set()
     
     iterations = 0
-    while open_heap and iterations < 9000:
+    while open_heap and iterations < 12000:
         iterations += 1
         _, curr_g, current = heapq.heappop(open_heap)
         
@@ -1064,7 +1084,7 @@ def get_crowd_sourced_path(p1, p2, strict_buffer=True):
                 return path
                 
             smoothed_path = moving_average_smooth(path, window_size=7)
-            return string_pull_path(smoothed_path, max_lookahead=120, use_buffer=strict_buffer)
+            return string_pull_path(smoothed_path, max_lookahead=80, use_buffer=strict_buffer)
             
         curr_in_buf = is_point_on_land_with_buffer(current[0]*resolution, current[1]*resolution)
         
@@ -1227,10 +1247,10 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
     if not coords or len(coords) < 2:
         return -999999.0
 
-    # 1. 絶対失格条件（陸地横断・内陸異常座標・北方領土/竹島侵入）
-    if route_crosses_land(coords, use_buffer=False):
+    # 1. 絶対失格条件（主要航路候補は陸地判定より優先し、北方領土/竹島侵入のみ失格）
+    if route_crosses_land(coords, use_buffer=False, is_searoute_native=is_main_candidate):
         return -999999.0
-    if any(is_deep_inland(c[0], c[1]) for c in coords):
+    if not is_main_candidate and any(is_deep_inland(c[0], c[1]) for c in coords):
         return -999999.0
     if intersects_northern_territories(coords):
         return -999999.0
@@ -1242,8 +1262,8 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
         max_detour = 30.0
         max_excess = 4.0
     else:
-        max_detour = 4.5 if is_main_candidate else 3.0
-        max_excess = 1.2 if is_main_candidate else 0.85
+        max_detour = 8.0 if is_main_candidate else 3.0
+        max_excess = 3.0 if is_main_candidate else 0.85
 
     if route_dist > (straight_dist * max_detour) and (route_dist - straight_dist) > max_excess:
         return -999999.0
@@ -1253,11 +1273,11 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
     # 2. 海岸線からの一定制限（13km離岸バリア）：主要航路のルートを優先し、実測・直線側のみ制限対象とする
     if not is_strait_or_manual and not is_main_candidate:
         if route_crosses_land(coords, use_buffer=True):
-            score -= 45.0
+            score -= 50.0
 
     detour_ratio = route_dist / max(straight_dist, 0.05)
     if detour_ratio > 1.0:
-        penalty_weight = 3.0 if is_strait_or_manual else 14.0
+        penalty_weight = 2.0 if (is_strait_or_manual or is_main_candidate) else 12.0
         score -= (detour_ratio - 1.0) * penalty_weight
 
     for i in range(1, len(coords) - 1):
@@ -1267,16 +1287,17 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
         if n1 > 0.02 and n2 > 0.02:
             cos_t = (v1x * v2x + v1y * v2y) / (n1 * n2)
             if cos_t < 0.0:
-                score -= 25.0 * abs(cos_t)
+                score -= (10.0 if is_main_candidate else 22.0) * abs(cos_t)
             elif cos_t < 0.5:
-                score -= 8.0 * (0.5 - cos_t)
+                score -= (3.0 if is_main_candidate else 7.0) * (0.5 - cos_t)
 
     if GLOBAL_SAFE_GRIDS:
         resolution = 0.20
         hits = sum(1 for c in coords if (int(round(c[0]/resolution)), int(round(c[1]/resolution))) in GLOBAL_SAFE_GRIDS)
         score += (hits / float(len(coords))) * 18.0
 
-    # 3. 海岸線制限エリアに接触する区間では主要航路を優先し、安全な外洋の実測帯では実測値補完を優先する
+    # 3. 陸地・海岸線制限エリアに接触する区間や長距離区間では主要航路を最優先し、
+    #    障害物のない外洋の実測帯では他船の実測値補完を優先する
     if not is_strait_or_manual:
         crosses_shore_buffer = route_crosses_land([p1, p2], use_buffer=True)
         if not is_main_candidate:
@@ -1284,11 +1305,11 @@ def score_candidate_route(coords, p1, p2, is_main_candidate, corridor_cov, is_st
                 score += 35.0
         else:
             if crosses_shore_buffer:
-                score += 25.0
-            elif corridor_cov >= 0.30 and straight_dist <= 8.0:
-                score -= 20.0
-            elif straight_dist > 8.0:
-                score += 15.0
+                score += 45.0
+            elif straight_dist > 6.0:
+                score += 30.0
+            elif corridor_cov >= 0.30:
+                score -= 15.0
 
     return score
 
@@ -1331,10 +1352,11 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
     if is_port_route:
         if straight_dist < 0.25 and not route_crosses_land([p1, p2], use_buffer=False) and not intersects_northern_territories([p1, p2]):
             return [p1, p2]
+        # 寄港ルートも陸地判定より主要航路を優先
+        sr_res = query_valid_searoute(p1, p2)
+        if sr_res and not intersects_northern_territories(sr_res):
+            return sr_res
         if manual_algo == "主要航路ベース" or is_strait:
-            sr_res = query_valid_searoute(p1, p2)
-            if sr_res and not route_crosses_land(sr_res, use_buffer=False):
-                return string_pull_path(subdivide_long_segments(sr_res, 0.08), max_lookahead=8, use_buffer=False)
             local_res = get_local_strait_path(p1, p2)
             if local_res and not route_crosses_land(local_res, use_buffer=False):
                 return local_res
@@ -1342,26 +1364,21 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             cs_res = get_crowd_sourced_path(p1, p2, strict_buffer=False)
             if cs_res and not route_crosses_land(cs_res, use_buffer=False) and not intersects_northern_territories(cs_res):
                 return cs_res
-        sr_res = query_valid_searoute(p1, p2)
-        if sr_res and not route_crosses_land(sr_res, use_buffer=False):
-            return sr_res
         return None
 
     direct_crosses_buf = route_crosses_land([p1, p2], use_buffer=True)
     direct_crosses_raw = route_crosses_land([p1, p2], use_buffer=False)
     direct_northern    = intersects_northern_territories([p1, p2])
 
-    # C. 東京湾・瀬戸内海・マラッカ海峡などの手動固定＆狭水道エリア
+    # C. 東京湾・瀬戸内海・マラッカ海峡などの手動固定＆狭水道エリア：主要航路を最優先
     if manual_algo == "主要航路ベース" or is_strait:
-        if straight_dist < 0.25 and not direct_crosses_raw and not direct_northern:
+        if straight_dist < 0.20 and not direct_crosses_raw and not direct_northern:
             return [p1, p2]
         sr_res = query_valid_searoute(p1, p2)
         if sr_res:
-            sr_pulled = string_pull_path(subdivide_long_segments(sr_res, 0.08), max_lookahead=10, use_buffer=False)
-            if score_candidate_route(sr_pulled, p1, p2, True, 0.5, is_strait_or_manual=True) > -500000:
-                return sr_pulled
+            return sr_res
         local_strait = get_local_strait_path(p1, p2)
-        if local_strait and score_candidate_route(local_strait, p1, p2, True, 0.5, is_strait_or_manual=True) > -500000:
+        if local_strait and score_candidate_route(local_strait, p1, p2, False, 0.5, is_strait_or_manual=True) > -500000:
             return local_strait
         if not direct_crosses_raw and not direct_northern and straight_dist < 1.0:
             return [p1, p2]
@@ -1381,12 +1398,14 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
                 if score_candidate_route(cs_res, p1, p2, False, 0.8) > -500000:
                     return cs_res
 
+    # 障害物・海岸線バリアに触れない外洋近〜中距離（約220km以内）は円滑直線を即決
     if straight_dist < 2.0 and not direct_crosses_buf and not direct_northern:
         return [p1, p2]
 
     corridor_cov = compute_corridor_coverage(p1, p2)
     candidates = []
 
+    # 候補A：他船実測点ベース（外洋実測帯用）
     if straight_dist <= 12.0:
         cs_cand = get_crowd_sourced_path(p1, p2, strict_buffer=True)
         if cs_cand:
@@ -1395,12 +1414,9 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             if sc_a > -500000:
                 candidates.append((sc_a, cs_cand))
 
-    # 主要航路候補は海岸線からの一定制限（13km離岸バリア）で歪めず、本来の主要航路ルートを優先して評価する
+    # 候補B：主要航路（searoute） — 陸地判定より優先して評価し、本来の主要航路形状を保持
     sr_cand = query_valid_searoute(p1, p2)
     if sr_cand:
-        sr_cand = subdivide_long_segments(sr_cand, max_step_deg=0.15)
-        sr_cand = string_pull_path(sr_cand, max_lookahead=60, use_buffer=False)
-        sr_cand = remove_d_spikes(sr_cand, protect_turns=False)
         sc_b = score_candidate_route(sr_cand, p1, p2, True, corridor_cov, is_strait_or_manual=False)
         if sc_b > -500000:
             candidates.append((sc_b, sr_cand))
@@ -1409,15 +1425,16 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
         candidates.sort(key=lambda x: x[0], reverse=True)
         return candidates[0][1]
 
+    # D. 断続化防止フォールバック
     if not direct_crosses_raw and not direct_northern and straight_dist < 1.2:
         return [p1, p2]
 
-    if straight_dist <= 12.0:
-        cs_relaxed = get_crowd_sourced_path(p1, p2, strict_buffer=False)
-        if cs_relaxed:
-            cs_relaxed = remove_d_spikes(cs_relaxed, protect_turns=False)
-            if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, is_strait_or_manual=True) > -500000:
-                return cs_relaxed
+    fb_res = 0.20 if straight_dist <= 12.0 else 0.50
+    cs_relaxed = get_crowd_sourced_path(p1, p2, strict_buffer=False, resolution=fb_res)
+    if cs_relaxed:
+        cs_relaxed = remove_d_spikes(cs_relaxed, protect_turns=True)
+        if score_candidate_route(cs_relaxed, p1, p2, False, corridor_cov, is_strait_or_manual=True) > -500000:
+            return cs_relaxed
 
     return None
 
@@ -1744,6 +1761,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
         curr_block = [cleaned_list[0][1]]
         curr_protect = False
         curr_johore = False
+        curr_searoute = False
 
         for i in range(1, len(cleaned_list)):
             prev_t, prev_p, prev_s, prev_d = cleaned_list[i-1]
@@ -1754,6 +1772,7 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             if port_interpolated:
                 interpolated = port_interpolated
                 curr_protect = True
+                curr_searoute = True
             else:
                 interpolated = interpolate_sea_route_linear(prev_p, curr_p, time_diff_hrs=time_diff_hrs, prev_speed=prev_s)
                 if is_johore_singapore_zone(prev_p, curr_p):
@@ -1761,6 +1780,10 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                     curr_johore = True
                 elif is_sakhalin_point(prev_p) or is_sakhalin_point(curr_p) or is_narrow_strait_zone(prev_p, curr_p) or get_manual_override_algorithm(prev_p, curr_p) == "主要航路ベース":
                     curr_protect = True
+                    curr_searoute = True
+                elif route_crosses_land([prev_p, curr_p], use_buffer=True):
+                    # 海岸線・陸地付近で主要航路が採用された区間は平滑化後も陸地判定で破棄しない
+                    curr_searoute = True
             
             if interpolated and len(interpolated) >= 2:
                 for pt in interpolated[1:]:
@@ -1768,20 +1791,21 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
                         curr_block.append(pt)
             else:
                 if len(curr_block) >= 2:
-                    ordered_blocks.append((curr_block, curr_protect, curr_johore))
+                    ordered_blocks.append((curr_block, curr_protect, curr_johore, curr_searoute))
                 curr_block = [curr_p]
                 curr_protect = False
                 curr_johore = False
+                curr_searoute = False
 
         if len(curr_block) >= 2:
-            ordered_blocks.append((curr_block, curr_protect, curr_johore))
+            ordered_blocks.append((curr_block, curr_protect, curr_johore, curr_searoute))
 
         if not ordered_blocks:
             continue
 
         processed_blocks = []
         
-        for raw_coords, protect_turns, has_johore in ordered_blocks:
+        for raw_coords, protect_turns, has_johore, has_searoute in ordered_blocks:
             if len(raw_coords) > 500:
                 step = len(raw_coords) / 500.0
                 sub_sampled = [raw_coords[int(j * step)] for j in range(500)]
@@ -1793,9 +1817,9 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
             de_spiked = remove_d_spikes(sub_sampled, protect_turns=protect_turns)
             smoothed = smooth_path_chaikin(de_spiked, iterations=4, max_step_deg=1.5)
             
-            if route_crosses_land(smoothed, use_buffer=False, allow_johore_real=has_johore) or intersects_northern_territories(smoothed):
+            if route_crosses_land(smoothed, use_buffer=False, allow_johore_real=has_johore, is_searoute_native=has_searoute) or intersects_northern_territories(smoothed):
                 smoothed_tight = smooth_path_chaikin(de_spiked, iterations=3, max_step_deg=0.35)
-                if not route_crosses_land(smoothed_tight, use_buffer=False, allow_johore_real=has_johore) and not intersects_northern_territories(smoothed_tight):
+                if not route_crosses_land(smoothed_tight, use_buffer=False, allow_johore_real=has_johore, is_searoute_native=has_searoute) and not intersects_northern_territories(smoothed_tight):
                     smoothed = smoothed_tight
                 else:
                     smoothed = de_spiked
