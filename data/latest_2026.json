@@ -110,7 +110,7 @@
       }
     ]
   },
-  "recent_count": 10,
+  "recent_count": 0,
   "latest": [
     {
       "mmsi": "373228000",
@@ -963,10 +963,10 @@
       "owner": "Nikko Kisen/Sun Lanes",
       "operator": "Nissen Kaiun Co Ltd",
       "survey": "20280105",
-      "lat": 14.536283333333333,
-      "lng": 120.88827833333333,
-      "speed": 0,
-      "heading": 0.0,
+      "lat": 14.536806666666667,
+      "lng": 120.88736666666667,
+      "speed": 0.1,
+      "heading": 55.4,
       "destination": "-",
       "eta": "-",
       "timestamp": "2026-11-22 00:38:18.38835671 +0000 UTC",
