@@ -81,7 +81,7 @@ JOHORE_EAST_GATE_N = [1.36, 104.10]  # チャンギ・テコン島北東の海�
 JOHORE_EAST_GATE_S = [1.28, 104.08]  # チャンギ南東のシンガポール海峡ゲート
 
 OFFSHORE_BUFFER_DEG  = 0.12  # 約13kmの離岸バリア（実測・直線補完側のガードレール）
-PORT_AREA_RADIUS_DEG = 0.45  # 仕向地エリア半径（約50km圏内なら無理な往復補完をしない）
+PORT_AREA_RADIUS_DEG = 0.45  # 仕向地エリア半径（デフォルト約50km）
 
 GLOBAL_SAFE_GRIDS = set()
 GLOBAL_FINE_REAL_GRIDS = set()  # 画像認識A*用の高解像度実測グリッド（約1km単位）
@@ -246,7 +246,6 @@ def get_tile_water_path(p1, p2):
     min_ty = int(min(y1, y2) // 256)
     max_ty = int(max(y1, y2) // 256)
 
-    # タイル数が多すぎる場合は負荷防止のためスキップ
     if (max_tx - min_tx + 1) * (max_ty - min_ty + 1) > 25:
         zoom = 10
         x1, y1 = latlng_to_pixel(p1[0], p1[1], zoom)
@@ -273,7 +272,6 @@ def get_tile_water_path(p1, p2):
     if not loaded_any:
         return None
 
-    # 4ピクセル単位に縮小して高速A*探索グリッドを構築
     cell_px = 4
     gw = canvas.width // cell_px
     gh = canvas.height // cell_px
@@ -291,8 +289,6 @@ def get_tile_water_path(p1, p2):
     if math.hypot(sx - ex, sy - ey) <= 1.5:
         return [list(p1), list(p2)]
 
-    # 画像認識：Esri World_Light_Gray_Base の水域（海・川・運河）を抽出
-    # 陸地は明るいグレー(R>=228)、水域はやや暗めのクールグレー(150<R<226, B>=R-2)
     water_grid = [[False] * gw for _ in range(gh)]
     label_grid = [[False] * gw for _ in range(gh)]
     for gy in range(gh):
@@ -301,10 +297,8 @@ def get_tile_water_path(p1, p2):
             if 145 <= r <= 226 and 145 <= g <= 228 and 145 <= b <= 232 and (b - r) >= -3:
                 water_grid[gy][gx] = True
             elif r < 145:
-                # 地図上の地名文字・橋・境界線など
                 label_grid[gy][gx] = True
 
-    # 水域に隣接する地名ラベル・橋を通行可能（川の途切れ防止）にする
     passable_bridge = [[False] * gw for _ in range(gh)]
     for gy in range(1, gh - 1):
         for gx in range(1, gw - 1):
@@ -346,12 +340,10 @@ def get_tile_water_path(p1, p2):
             path.append(list(p1))
             path.reverse()
 
-            # 陸地を大きく突っ切っていないかチェック（A*コストが異常に高ければ棄却）
             if curr_g > math.hypot(sx - ex, sy - ey) * 35.0:
                 return None
 
             smoothed = moving_average_smooth(path, window_size=5)
-            # 点を適度に間引いて滑らかな軌跡にする
             if len(smoothed) > 40:
                 step = max(1, len(smoothed) // 35)
                 reduced = [smoothed[0]] + smoothed[step:-1:step] + [smoothed[-1]]
@@ -370,17 +362,14 @@ def get_tile_water_path(p1, p2):
             step_dist = 1.4142 if (dx != 0 and dy != 0) else 1.0
 
             if water_grid[ny][nx]:
-                # 実測点がある水域はさらに低コストで最優先
                 lat_n, lng_n = pixel_to_latlng(origin_px + (nx + 0.5) * cell_px, origin_py + (ny + 0.5) * cell_px, zoom)
                 fgk = (int(round(lat_n * 100)), int(round(lng_n * 100)))
                 cost = 0.7 if fgk in GLOBAL_FINE_REAL_GRIDS else 1.0
             elif passable_bridge[ny][nx]:
                 cost = 2.5
             elif math.hypot(nx - sx, ny - sy) <= 3 or math.hypot(nx - ex, ny - ey) <= 3:
-                # 始点・終点の港湾岸壁付近（最大3セル）は進入を許容
                 cost = 5.0
             else:
-                # 陸地は極めて高いペナルティ（迂回不能な狭小運河のみ突破）
                 cost = 120.0
 
             tentative_g = curr_g + step_dist * cost
@@ -695,20 +684,121 @@ def get_port_dictionary(client):
                 existing_ais_names.add(ais_name)
                 lat = r.get("Lat")
                 lng = r.get("Lng")
-                name = r.get("寄港地名(標準)")
+                name = str(r.get("寄港地名(標準)", "")).strip()
+
+                radius_deg = PORT_AREA_RADIUS_DEG
+                raw_rad = r.get("Radius_km")
+                if raw_rad not in ("", None):
+                    try:
+                        rad_km = float(raw_rad)
+                        if rad_km > 0:
+                            radius_deg = rad_km / 111.0
+                    except ValueError:
+                        pass
+
                 if lat not in ("", None) and lng not in ("", None):
                     try:
                         port_dict[ais_name] = {
-                            "name": str(name) if name else ais_name,
+                            "name": name,
                             "lat": float(lat),
                             "lng": float(lng),
-                            "source": "manual"
+                            "radius_deg": radius_deg,
+                            "source": "manual" if name else "auto"
                         }
                     except ValueError:
                         pass
+                elif radius_deg != PORT_AREA_RADIUS_DEG:
+                    port_dict[ais_name] = {
+                        "name": name,
+                        "lat": None,
+                        "lng": None,
+                        "radius_deg": radius_deg,
+                        "source": "auto"
+                    }
     except Exception:
         pass
     return port_dict, existing_ais_names
+
+
+def sync_port_dictionary_to_sheet(client, existing_latest, effective_port_dict):
+    """
+    Port_Dictionary シートを自動更新する：
+    1. 寄港地名(標準)が空欄の行は、実績から再計算した最新の代表位置（Lat/Lng）で継続更新する（標準名ありの手動行は保護）
+    2. 新規の仕向地コードは、推定座標があれば [コード, "", Lat, Lng]、未推定なら [コード, "", "", ""] で追加する
+    """
+    if not client or not SPREADSHEET_ID:
+        return
+    try:
+        sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
+        all_values = sheet.get_all_values()
+        if not all_values:
+            return
+
+        headers = [h.strip() for h in all_values[0]]
+        try:
+            col_ais = headers.index("変換元(AIS表記)")
+            col_name = headers.index("寄港地名(標準)")
+            col_lat = headers.index("Lat")
+            col_lng = headers.index("Lng")
+        except ValueError:
+            print("[WARN] Port_Dictionary のヘッダー列が見つかりません。", flush=True)
+            return
+
+        existing_ais_names = set()
+        cell_updates = []
+
+        for row_idx, row in enumerate(all_values[1:], start=2):
+            ais_name = row[col_ais].strip().upper() if len(row) > col_ais else ""
+            if not ais_name:
+                continue
+            existing_ais_names.add(ais_name)
+
+            std_name = row[col_name].strip() if len(row) > col_name else ""
+            if std_name:
+                continue
+
+            info = effective_port_dict.get(ais_name)
+            if not info or info.get("source") != "inferred":
+                continue
+
+            cur_lat = row[col_lat].strip() if len(row) > col_lat else ""
+            cur_lng = row[col_lng].strip() if len(row) > col_lng else ""
+            new_lat_str = str(info["lat"])
+            new_lng_str = str(info["lng"])
+
+            if cur_lat != new_lat_str or cur_lng != new_lng_str:
+                cell_updates.append({
+                    "range": gspread.utils.rowcol_to_a1(row_idx, col_lat + 1),
+                    "values": [[info["lat"]]]
+                })
+                cell_updates.append({
+                    "range": gspread.utils.rowcol_to_a1(row_idx, col_lng + 1),
+                    "values": [[info["lng"]]]
+                })
+
+        if cell_updates:
+            sheet.batch_update(cell_updates)
+            print(f"[INFO] Port_Dictionary の自動推定座標を {len(cell_updates) // 2} 件更新しました。", flush=True)
+
+        seen_dests = set()
+        for ship in existing_latest.values():
+            d = str(ship.get("destination", "")).strip().upper()
+            if d and d not in ("-", "NONE"):
+                seen_dests.add(d)
+
+        new_dests = sorted(list(seen_dests - existing_ais_names))
+        if new_dests:
+            append_data = []
+            for d in new_dests:
+                info = effective_port_dict.get(d)
+                if info and info.get("source") == "inferred":
+                    append_data.append([d, "", info["lat"], info["lng"]])
+                else:
+                    append_data.append([d, "", "", ""])
+            sheet.append_rows(append_data)
+            print(f"[INFO] Port_Dictionary に {len(new_dests)} 件の新しい仕向地を追加しました。", flush=True)
+    except Exception as e:
+        print(f"[WARN] Port_Dictionary の自動更新中にエラーが発生しました: {e}", flush=True)
 
 
 def is_point_on_land(lat, lng):
@@ -801,23 +891,26 @@ def infer_port_areas_from_fleet(tracks_map, base_port_dict):
 
     inferred_count = 0
     for dest_code, lats in dest_lats.items():
-        if dest_code in effective_dict:
+        existing = effective_dict.get(dest_code)
+        if existing and existing.get("source") == "manual":
             continue
         if len(lats) >= 3:
             med_lat = round(statistics.median(lats), 4)
             med_lng = round(statistics.median(dest_lngs[dest_code]), 4)
             if is_deep_inland(med_lat, med_lng):
                 continue
+            radius_deg = existing.get("radius_deg", PORT_AREA_RADIUS_DEG) if existing else PORT_AREA_RADIUS_DEG
             effective_dict[dest_code] = {
-                "name": f"{dest_code}(他船実績推定)",
+                "name": "",
                 "lat": med_lat,
                 "lng": med_lng,
+                "radius_deg": radius_deg,
                 "source": "inferred"
             }
             inferred_count += 1
 
     if inferred_count > 0:
-        print(f"[INFO] 他船実績から {inferred_count} 件の想定寄港エリアを補完しました。", flush=True)
+        print(f"[INFO] 他船実績から {inferred_count} 件の想定寄港エリアを算出・更新しました。", flush=True)
 
     return effective_dict
 
@@ -1759,7 +1852,6 @@ def _compute_base_geometry(p1, p2, is_port_route=False):
             cs_fb = get_crowd_sourced_path(p1, p2, strict_buffer=False)
             if cs_fb and score_candidate_route(cs_fb, p1, p2, False, 0.5, is_strait_or_manual=True) > -500000:
                 return cs_fb
-        # 狭水道・河川フォールバック（画像認識×実測値）
         if straight_dist <= 1.2 and not direct_northern:
             tile_path = get_tile_water_path(p1, p2)
             if tile_path:
@@ -1838,7 +1930,6 @@ def interpolate_sea_route_linear(p1, p2, time_diff_hrs=None, is_port_route=False
         _ROUTE_CACHE_DIRTY = True
 
     if not base_res or len(base_res) < 2:
-        # 河川・超近距離（約15km以内）で速度妥当な場合のみ最終救済として直接接続
         if not is_port_route and not is_johore_singapore_zone(p1, p2) and not is_changi_crossing(p1, p2):
             d_deg = geo_dist_deg(p1, p2)
             if d_deg <= 0.14 and not intersects_northern_territories([p1, p2]):
@@ -1869,13 +1960,14 @@ def try_infer_segment_via_port(prev_p, curr_p, prev_dest, curr_dest, time_diff_h
         return None
         
     port_info = effective_port_dict.get(p_dest)
-    if not port_info:
+    if not port_info or port_info.get("lat") is None or port_info.get("lng") is None:
         return None
         
     raw_port_pos = [port_info["lat"], port_info["lng"]]
+    port_radius_deg = port_info.get("radius_deg", PORT_AREA_RADIUS_DEG)
     
-    if geo_dist_deg(prev_p, raw_port_pos) <= PORT_AREA_RADIUS_DEG or \
-       geo_dist_deg(curr_p, raw_port_pos) <= PORT_AREA_RADIUS_DEG:
+    if geo_dist_deg(prev_p, raw_port_pos) <= port_radius_deg or \
+       geo_dist_deg(curr_p, raw_port_pos) <= port_radius_deg:
         return None
         
     port_approach = get_port_approach_point(raw_port_pos)
@@ -2283,14 +2375,18 @@ def update_history_and_generate_tracks(live_ships, master_map, existing_latest, 
     for mmsi, ship_data in existing_latest.items():
         ship_data["heading"] = calculated_headings.get(mmsi, 0.0)
         dest_val = ship_data.get("destination", "-")
-        ship_data["dest_name"] = effective_port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
+        if dest_val != "-":
+            p_info = effective_port_dict.get(dest_val.upper(), {})
+            ship_data["dest_name"] = p_info.get("name", "") if p_info.get("source") == "manual" else ""
+        else:
+            ship_data["dest_name"] = ""
 
     with open(ROUTES_FILE, "w", encoding="utf-8") as f:
         json.dump(routes_output, f, ensure_ascii=False)
 
     save_persistent_route_cache()
     print(f"[INFO] 軌跡計算完了: {len(routes_output)} 隻 (所要時間: {round(time.time() - t_start, 1)}秒)", flush=True)
-    return calculated_headings
+    return calculated_headings, effective_port_dict
 
 
 def update_coverage_from_all_latest(existing_latest):
@@ -2441,12 +2537,16 @@ def main():
                 ship_data["survey"] = m["survey"]
             
         dest_val = ship_data.get("destination", "-")
-        ship_data["dest_name"] = port_dict.get(dest_val.upper(), {}).get("name", "") if dest_val != "-" else ""
+        if dest_val != "-":
+            p_info = port_dict.get(dest_val.upper(), {})
+            ship_data["dest_name"] = p_info.get("name", "") if p_info.get("source") == "manual" else ""
+        else:
+            ship_data["dest_name"] = ""
 
     active_coords = update_coverage_from_all_latest(existing_latest)
     sync_and_load_algorithm_map(client, active_points=active_coords)
 
-    update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict)
+    _, effective_port_dict = update_history_and_generate_tracks(live_ships, master_map, existing_latest, port_dict)
     
     recent_count = len([mmsi for mmsi, ship in live_ships.items() if ship.get("lat") is not None and ship.get("lng") is not None])
 
@@ -2457,21 +2557,7 @@ def main():
             "latest": list(existing_latest.values())
         }, f, ensure_ascii=False, indent=2)
 
-    seen_dests = set()
-    for ship in existing_latest.values():
-        d = str(ship.get("destination", "")).strip().upper()
-        if d and d not in ("-", "NONE"):
-            seen_dests.add(d)
-    
-    new_dests = seen_dests - existing_ais_names
-    if new_dests:
-        try:
-            sheet = client.open_by_key(SPREADSHEET_ID).worksheet("Port_Dictionary")
-            append_data = [[d, "", ""] for d in sorted(list(new_dests))]
-            sheet.append_rows(append_data)
-            print(f"[INFO] 辞書に {len(new_dests)} 件の新しい仕向地を追加しました。", flush=True)
-        except Exception:
-            pass
+    sync_port_dictionary_to_sheet(client, existing_latest, effective_port_dict)
 
     print(f"[INFO] 全処理正常完了 (合計所要時間: {round(time.time() - t_total, 1)}秒)", flush=True)
 
